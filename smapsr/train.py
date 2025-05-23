@@ -63,8 +63,7 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
                 data.append(ys[:, 0, :].T)
     data = jnp.array(data)
     key = jr.PRNGKey(seed)
-    model_key, loader_key = j
-    r.split(key, 2)
+    model_key, loader_key = jr.split(key, 2)
     ts = jnp.linspace(0, 1, 100)
     _, data_size, _ = data.shape
     model = NeuralODE(data_size, width_size, depth, key=model_key)
