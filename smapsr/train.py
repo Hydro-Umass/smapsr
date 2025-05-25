@@ -72,7 +72,8 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
     @eqx.filter_value_and_grad
     def grad_loss(model, ti, yi):
         y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:, :, 0])
-        return jnp.mean((yi[:, :, -1] - y_pred) ** 2)
+        loss = jnp.mean((yi[:, :, -1] - y_pred) ** 2)
+        return loss
     @eqx.filter_jit
     def make_step(ti, yi, model, opt_state):
         loss, grads = grad_loss(model, ti, yi)
