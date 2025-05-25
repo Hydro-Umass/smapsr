@@ -87,8 +87,3 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
         if ((step + 1) % print_every) == 0 or step == steps - 1:
             print(f"Step: {step+1}, Loss: {loss}, Time elapsed: {end - start}")
     return model
-
-
-if __name__ == '__main__':
-    s9 = xr.open_dataset("../smap9km.nc").sm.rio.write_crs("epsg:4326")
-    s3 = xr.open_dataset("../smap3km.nc").sm.rio.write_crs("epsg:4326")
