@@ -8,7 +8,7 @@ import jax.random as jr
 import optax
 import equinox as eqx
 from rasterio.enums import Resampling
-from models import NeuralODE
+from smapsr.models import NeuralODE
 
 def prepare_data(sl, sh, region):
     """Prepare data for super-resolution.
