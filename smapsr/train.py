@@ -25,6 +25,16 @@ def prepare_data(sl, sh, region):
     ys = jnp.stack([slri_.data.reshape((1, -1)), shr_.data.reshape((1, -1))])
     return slr, shr, slri, ys
 
+def dataloader_seq(data, batch_size):
+    dataset_size = len(data[0])
+    start = 0
+    while start < dataset_size:
+        end = min(start + batch_size, dataset_size)
+        batch_data = data[0][start:end]
+        batch_mask = data[1][start:end]
+        yield (batch_data, batch_mask)
+        start = end
+
 def dataloader(arrays, batch_size, *, key):
     dataset_size = arrays[0].shape[0]
     indices = jnp.arange(dataset_size)
