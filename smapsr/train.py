@@ -49,7 +49,7 @@ def dataloader(arrays, batch_size, *, key):
             start = end
             end = start + batch_size
 
-def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=100, batch_size=32, seed=5678, print_every=20):
+def train(sl, sh, region, train_period, channels=[1, 32, 64, 128, 64, 32, 1], lr=1e-3, steps=100, batch_size=32, seed=5678, print_every=20):
     """Train Neural ODE model for super-resolution of SMAP data.
 
     :param sl: coarse resolution data (xr.DataArray)
@@ -72,17 +72,17 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
             if slr_.notnull().any() and shr_.notnull().any():
                 data.append(ys[:, 0, :].T)
     data = jnp.array(data)
+    mask = jnp.array(~(sh.sel(x=slice(region[0], region[2]), y=slice(region[1], region[3])).notnull().sum('time') == 0))
     key = jr.PRNGKey(seed)
     model_key, loader_key = jr.split(key, 2)
     ts = jnp.linspace(0, 1, 100)
-    _, data_size, _ = data.shape
-    model = NeuralODE(data_size, width_size, depth, key=model_key)
+    model = NeuralODE(mask, channels, 1, key=model_key)
     optim = optax.adabelief(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     @eqx.filter_value_and_grad
     def grad_loss(model, ti, yi):
-        y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:, :, 0])
-        loss = jnp.mean((yi[:, :, -1] - y_pred) ** 2)
+        y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:, :, 0][:, None, :])
+        loss = jnp.mean((yi[..., model.valid] - y_pred[..., model.valid]) ** 2)
         return loss
     @eqx.filter_jit
     def make_step(ti, yi, model, opt_state):
