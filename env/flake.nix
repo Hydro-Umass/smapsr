@@ -150,7 +150,8 @@
                 pkgs.linuxPackages.nvidia_x11
                 pkgs.python3Packages.pyflakes
                 pkgs.python3Packages.jupytext
-                pkgs.python3Packages.python-lsp-server
+                # pkgs.python3Packages.python-lsp-server
+                pkgs.pyright
                 pkgs.python3Packages.isort
                 diffrax
                 pyresample
