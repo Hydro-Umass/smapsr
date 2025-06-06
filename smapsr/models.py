@@ -15,10 +15,13 @@ class Func(eqx.Module):
 
 class NeuralODE(eqx.Module):
     func: Func
+    height: int
+    width: int
 
-    def __init__(self, data_size, width_size, depth, *, key, **kwargs):
+    def __init__(self, data_size, width_size, depth, image_size, *, key, **kwargs):
         super().__init__(**kwargs)
         self.func = Func(data_size, width_size, depth, key=key)
+        self.height, self.width = image_size
 
     def __call__(self, ts, y0):
         solution = diffrax.diffeqsolve(

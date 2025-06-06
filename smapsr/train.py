@@ -66,14 +66,20 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
     model_key, loader_key = jr.split(key, 2)
     ts = jnp.linspace(0, 1, 100)
     _, data_size, _ = data.shape
-    model = NeuralODE(data_size, width_size, depth, key=model_key)
+    model = NeuralODE(data_size, width_size, depth, shr_.shape, key=model_key)
     optim = optax.adabelief(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     @eqx.filter_value_and_grad
     def grad_loss(model, ti, yi):
         y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:, :, 0])
-        loss = jnp.mean((yi[:, :, -1] - y_pred) ** 2)
-        return loss
+        yi_img = yi[:, :, -1].reshape(yi.shape[0], model.width, model.height)
+        yp_img = y_pred[:, 0, :].reshape(y_pred.shape[0], model.width, model.height)
+        yi_dy, yi_dx = jnp.gradient(yi_img, axis=(1, 2))
+        yp_dy, yp_dx = jnp.gradient(yp_img, axis=(1, 2))
+        grad_loss = jnp.mean((yi_dy - yp_dy)**2) + jnp.mean((yi_dx - yp_dx)**2)
+        # l2_loss = jnp.mean((yi[:, :, -1] - y_pred[:, 0, :]) ** 2)
+        l1_loss = jnp.mean(jnp.abs(yi[:, :, -1] - y_pred[:, 0, :]))
+        return l1_loss + grad_loss
     @eqx.filter_jit
     def make_step(ti, yi, model, opt_state):
         loss, grads = grad_loss(model, ti, yi)
