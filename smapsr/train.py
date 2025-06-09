@@ -60,14 +60,18 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
     for t in train_period:
         if t in sl.time and t in sh.time:
             slr_, shr_, slri_, ys = prepare_data(sl.sel(time=t), sh.sel(time=t), region)
-            if slr_.notnull().any() and shr_.notnull().any():
+            # number of pixels spatially aligned between coarse and fine resolution images
+            spatial_match_thresh = 90
+            spatial_match = slr_.where(shr_.rio.reproject_match(slr_,).notnull()).notnull().sum()
+            if slr_.notnull().any() and shr_.notnull().any() and spatial_match > spatial_match_thresh:
                 data.append(ys[:, 0, :].T)
     data = jnp.array(data)
     key = jr.PRNGKey(seed)
     model_key, loader_key = jr.split(key, 2)
     ts = jnp.linspace(0, 1, 100)
     _, data_size, _ = data.shape
-    model = NeuralODE(data_size, width_size, depth, shr_.shape, key=model_key)
+    mask = jnp.array((sh.sel(x=slice(region[0], region[2]), y=slice(region[1], region[3])).notnull().sum('time') > 0).data)
+    model = NeuralODE(data_size, width_size, depth, mask, key=model_key)
     optim = optax.adabelief(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     @eqx.filter_value_and_grad

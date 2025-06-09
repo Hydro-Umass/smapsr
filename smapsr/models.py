@@ -1,3 +1,4 @@
+import jax
 import jax.nn as jnn
 import equinox as eqx
 import diffrax
@@ -15,13 +16,15 @@ class Func(eqx.Module):
 
 class NeuralODE(eqx.Module):
     func: Func
+    mask: jax.Array
     height: int
     width: int
 
-    def __init__(self, data_size, width_size, depth, image_size, *, key, **kwargs):
+    def __init__(self, data_size, width_size, depth, mask, *, key, **kwargs):
         super().__init__(**kwargs)
         self.func = Func(data_size, width_size, depth, key=key)
-        self.height, self.width = image_size
+        self.mask = mask
+        self.height, self.width = mask.shape
 
     def __call__(self, ts, y0):
         solution = diffrax.diffeqsolve(
