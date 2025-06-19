@@ -26,13 +26,16 @@ def prepare_data(sl, sh, region):
     ys = jnp.stack([slri_.data.reshape((1, -1)), shr_.data.reshape((1, -1))])
     return slr, shr, slri, ys
 
-def dataloader(arrays, batch_size, *, key):
+def dataloader(arrays, batch_size, *, key, shuffle=True):
     dataset_size = arrays[0].shape[0]
     indices = jnp.arange(dataset_size)
     while True:
-        perm = jr.permutation(key, indices)
-        (key,) = jr.split(key, 1)
         start = 0
+        if shuffle:
+            perm = jr.permutation(key, indices)
+        else:
+            perm = indices
+        (key,) = jr.split(key, 1)
         end = batch_size
         while end < dataset_size:
             batch_perm = perm[start:end]
