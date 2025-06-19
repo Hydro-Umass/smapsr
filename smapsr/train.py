@@ -85,7 +85,7 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
         g_loss = gradient_loss(yi_img, yp_img)
         l1_loss = mae_loss(yi_img, yp_img, model.mask)
         s_loss = masked_ssim_loss(yi_img, yp_img, model.mask)
-        return 0.3*l1_loss + 0.1*g_loss + 0.6*s_loss
+        return 0.4*l1_loss + 0.0*g_loss + 0.6*s_loss
     @eqx.filter_jit
     def make_step(ti, yi, model, opt_state):
         loss, grads = grad_loss(model, ti, yi)
