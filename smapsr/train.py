@@ -80,8 +80,8 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
     @eqx.filter_value_and_grad
     def grad_loss(model, ti, yi):
         y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:, :, 0])
-        yi_img = yi[:, :, -1].reshape(yi.shape[0], model.width, model.height)
-        yp_img = y_pred[:, 0, :].reshape(y_pred.shape[0], model.width, model.height)
+        yi_img = yi[:, :, -1].reshape(yi.shape[0], model.height, model.width)
+        yp_img = y_pred[:, 0, :].reshape(y_pred.shape[0], model.height, model.width)
         g_loss = gradient_loss(yi_img, yp_img)
         l1_loss = mae_loss(yi_img, yp_img, model.mask)
         s_loss = masked_ssim_loss(yi_img, yp_img, model.mask)
