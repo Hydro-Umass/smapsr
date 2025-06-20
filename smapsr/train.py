@@ -68,6 +68,8 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
             spatial_match = slr_.where(shr_.rio.reproject_match(slr_,).notnull()).notnull().sum()
             if slr_.notnull().any() and shr_.notnull().any() and spatial_match > spatial_match_thresh:
                 data.append(ys[:, 0, :].T)
+    if len(data) == 0:
+        raise ValueError("No valid data found for this region")
     data = jnp.array(data)
     key = jr.PRNGKey(seed)
     model_key, loader_key = jr.split(key, 2)
