@@ -23,8 +23,9 @@ def prepare_data(sl, sh, region):
     slr_ = slr.rio.write_nodata(np.nan).rio.interpolate_na()
     slri_ = slr_.rio.reproject_match(shr_, resampling=Resampling.bilinear).rio.interpolate_na()
     slri = slri_.where(shr.notnull())
-    ys = jnp.stack([slri_.data.reshape((1, -1)), shr_.data.reshape((1, -1))])
-    return slr, shr, slri, ys
+    y0 = slri_.rio.interpolate_na().data.reshape((1, -1))
+    ys = shr_.data.reshape((1, -1))
+    return slr, shr, slri, y0, ys
 
 def dataloader(arrays, batch_size, *, key, shuffle=True):
     """Generate batches of data from input arrays. This generator yields batches of data from the provided arrays, supporting both shuffling and non-shuffled data iteration. It is designed to handle cases where the dataset size may be smaller than or equal to the batch size.
@@ -76,7 +77,8 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
             spatial_match_thresh = 90
             spatial_match = slr_.where(shr_.rio.reproject_match(slr_,).notnull()).notnull().sum()
             if slr_.notnull().any() and shr_.notnull().any() and spatial_match > spatial_match_thresh:
-                data.append(ys[:, 0, :].T)
+                data0.append(y0.T)
+                data.append(ys.T)
     if len(data) == 0:
         raise ValueError("No valid data found for this region")
     data = jnp.array(data)
