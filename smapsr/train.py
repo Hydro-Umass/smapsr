@@ -84,7 +84,11 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
                 data.append(ys.T)
     if len(data) == 0:
         raise ValueError("No valid data found for this region")
-    data = jnp.array(data)
+    data = jnp.array(data).clip(0.01, 0.65)
+    data0 = jnp.array(data0).clip(0.01, 0.65)
+    m, s = data0.mean(), data0.std()
+    data = (data - m) / s
+    data0 = (data0 - m) / s
     key = jr.PRNGKey(seed)
     model_key, loader_key = jr.split(key, 2)
     ts = jnp.linspace(0, 1, 100)
