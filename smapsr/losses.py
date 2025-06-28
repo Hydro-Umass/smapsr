@@ -91,3 +91,74 @@ def masked_ssim(img1, img2, mask, max_val=1.0, kernel_size=11, sigma=1.5, k1=0.0
 def masked_ssim_loss(img1, img2, mask, **kwargs):
     """SSIM loss (1 - SSIM) for batched inputs."""
     return 1 - jnp.mean(masked_ssim(img1, img2, mask, **kwargs))
+
+def batch_correlation_masked(arr1, arr2, mask):
+    """
+    Calculate correlation between two JAX arrays along the batch dimension,
+    only considering valid (masked) pixels.
+
+    Args:
+        arr1: JAX array of shape (B, H, W)
+        arr2: JAX array of shape (B, H, W)
+        mask: JAX array of shape (B, H, W) with 1 for valid pixels, 0 for invalid
+
+    Returns:
+        JAX array of shape (H, W) containing correlation coefficients for valid pixels
+    """
+    batch_size = arr1.shape[0]
+    mask = _prepare_mask(mask, batch_size)
+    B, H, W = arr1.shape
+    # Reshape arrays to (B, H*W)
+    arr1_flat = arr1.reshape(B, H * W)
+    arr2_flat = arr2.reshape(B, H * W)
+    mask_flat = mask.reshape(B, H * W)
+    # Count valid samples per pixel location
+    valid_count = jnp.sum(mask_flat, axis=0)  # Shape: (H*W,)
+    # Avoid division by zero - set minimum count to 1
+    valid_count = jnp.maximum(valid_count, 1)
+    # Calculate masked means
+    masked_sum1 = jnp.sum(arr1_flat * mask_flat, axis=0)
+    masked_sum2 = jnp.sum(arr2_flat * mask_flat, axis=0)
+    mean1 = masked_sum1 / valid_count
+    mean2 = masked_sum2 / valid_count
+    # Center the data (only for valid pixels)
+    centered1 = (arr1_flat - mean1[None, :]) * mask_flat
+    centered2 = (arr2_flat - mean2[None, :]) * mask_flat
+    # Calculate masked covariance
+    covariance = jnp.sum(centered1 * centered2, axis=0) / valid_count
+    # Calculate masked standard deviations
+    var1 = jnp.sum(centered1**2, axis=0) / valid_count
+    var2 = jnp.sum(centered2**2, axis=0) / valid_count
+    std1 = jnp.sqrt(var1)
+    std2 = jnp.sqrt(var2)
+    # Calculate correlation coefficient
+    eps = 1e-8
+    correlation = covariance / (std1 * std2 + eps)
+    # Set correlation to 0 where there are no valid pixels
+    correlation = jnp.where(jnp.sum(mask_flat, axis=0) > 1, correlation, 0.0)
+    return correlation.reshape(H, W)
+
+def corr_loss_masked(arr1, arr2, mask):
+    """
+    Masked correlation loss - only compute loss for valid regions.
+
+    Args:
+        arr1: JAX array of shape (B, H, W)
+        arr2: JAX array of shape (B, H, W)
+        mask: JAX array of shape (B, H, W) with 1 for valid pixels, 0 for invalid
+
+    Returns:
+        Scalar loss value
+    """
+    if mask is None:
+        return correlation_loss_negative(arr1, arr2)
+    # Get masked correlation matrix
+    corr_matrix = batch_correlation_masked(arr1, arr2, mask)
+    # Create spatial mask (1 where we have valid correlations)
+    spatial_mask = (jnp.sum(mask, axis=0) > 1).astype(jnp.float32)
+    # Apply loss function only to valid spatial locations
+    loss_per_pixel = (1 - corr_matrix) * spatial_mask
+    # Average over valid spatial locations
+    total_loss = jnp.sum(loss_per_pixel)
+    valid_pixels = jnp.sum(spatial_mask)
+    return total_loss / jnp.maximum(valid_pixels, 1)
