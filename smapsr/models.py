@@ -16,6 +16,7 @@ class Func(eqx.Module):
 
 class NeuralODE(eqx.Module):
     func: Func
+    upsampler: eqx.nn.ConvTranspose2d
     mask: jax.Array
     height: int
     width: int
@@ -24,9 +25,11 @@ class NeuralODE(eqx.Module):
         super().__init__(**kwargs)
         self.func = Func(data_size, width_size, depth, key=key)
         self.mask = mask
+        self.upsampler = eqx.nn.ConvTranspose2d(1, 1, 9, padding='SAME', key=key)
         self.height, self.width = mask.shape
 
-    def __call__(self, ts, y0):
+    def __call__(self, ts, y):
+        y0 = self.upsampler(y.reshape(-1, self.height, self.width)).ravel()
         solution = diffrax.diffeqsolve(
             diffrax.ODETerm(self.func),
             diffrax.Tsit5(),
