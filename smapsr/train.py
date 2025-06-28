@@ -9,7 +9,7 @@ import optax
 import equinox as eqx
 from rasterio.enums import Resampling
 from smapsr.models import NeuralODE
-from smapsr.losses import masked_ssim_loss, mae_loss, gradient_loss
+from smapsr.losses import masked_ssim_loss, mae_loss, gradient_loss, corr_loss_masked, mse_loss
 
 def prepare_data(sl, sh, region):
     """Prepare data for super-resolution.
@@ -98,24 +98,26 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
     optim = optax.adabelief(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     @eqx.filter_value_and_grad
-    def grad_loss(model, ti, yi):
-        y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:, :, 0])
-        yi_img = yi[:, :, -1].reshape(yi.shape[0], model.height, model.width)
+    def grad_loss(model, ti, y0, yi):
+        y_pred = jax.vmap(model, in_axes=(None, 0))(ti, y0[:, :, 0])
+        yi_img = yi.reshape(yi.shape[0], model.height, model.width)
         yp_img = y_pred[:, 0, :].reshape(y_pred.shape[0], model.height, model.width)
-        g_loss = gradient_loss(yi_img, yp_img)
+        # g_loss = gradient_loss(yi_img, yp_img)
+        l2_loss = mse_loss(yi_img, yp_img, model.mask)
         l1_loss = mae_loss(yi_img, yp_img, model.mask)
         s_loss = masked_ssim_loss(yi_img, yp_img, model.mask)
-        return 0.4*l1_loss + 0.0*g_loss + 0.6*s_loss
+        # c_loss = corr_loss_masked(yi_img, yp_img, model.mask)
+        return 0.5*l2_loss + 0.5*s_loss
     @eqx.filter_jit
-    def make_step(ti, yi, model, opt_state):
-        loss, grads = grad_loss(model, ti, yi)
+    def make_step(ti, y0, yi, model, opt_state):
+        loss, grads = grad_loss(model, ti, y0, yi)
         updates, opt_state = optim.update(grads, opt_state)
         model = eqx.apply_updates(model, updates)
         return loss, model, opt_state
-    for step, (yi,) in zip(range(steps), dataloader((data,), batch_size, key=loader_key)):
+    for step, (y0, yi) in zip(range(steps), dataloader((data0, data), batch_size, key=loader_key)):
         start = time.time()
-        loss, model, opt_state = make_step(ts, yi, model, opt_state)
+        loss, model, opt_state = make_step(ts, y0, yi, model, opt_state)
         end = time.time()
         if ((step + 1) % print_every) == 0 or step == steps - 1:
             print(f"Step: {step+1}, Loss: {loss}, Time elapsed: {end - start}")
-    return model
+    return model, m, s
