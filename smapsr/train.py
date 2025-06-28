@@ -27,6 +27,15 @@ def prepare_data(sl, sh, region):
     return slr, shr, slri, ys
 
 def dataloader(arrays, batch_size, *, key, shuffle=True):
+    """Generate batches of data from input arrays. This generator yields batches of data from the provided arrays, supporting both shuffling and non-shuffled data iteration. It is designed to handle cases where the dataset size may be smaller than or equal to the batch size.
+
+    :param arrays: A tuple of JAX arrays to create batches from. Each array must have the same shape[0] (dataset_size).
+    :param batch_size: The desired number of samples per batch.
+    :param key: A JAX random key for shuffling.
+    :param shuffle: Whether or not to shuffle data. Default is True.
+
+    Yields:
+        tuple: A tuple containing one batch from each input array, aligned by index."""
     dataset_size = arrays[0].shape[0]
     indices = jnp.arange(dataset_size)
     while True:
@@ -36,12 +45,12 @@ def dataloader(arrays, batch_size, *, key, shuffle=True):
         else:
             perm = indices
         (key,) = jr.split(key, 1)
-        end = batch_size
-        while end < dataset_size:
+        end = min(start + batch_size, dataset_size)
+        while start < dataset_size:
             batch_perm = perm[start:end]
             yield tuple(array[batch_perm] for array in arrays)
             start = end
-            end = start + batch_size
+            end = min(start + batch_size, dataset_size)
 
 def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=100, batch_size=32, seed=5678, print_every=20):
     """Train Neural ODE model for super-resolution of SMAP data.
