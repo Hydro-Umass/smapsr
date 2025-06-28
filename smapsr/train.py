@@ -69,13 +69,16 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
     :param print_every: epoch frequency to print training information (int)
 
     """
+    data0 = []
     data = []
     for t in train_period:
         if t in sl.time and t in sh.time:
-            slr_, shr_, slri_, ys = prepare_data(sl.sel(time=t), sh.sel(time=t), region)
+            slr_, shr_, slri_, y0, ys = prepare_data(sl.sel(time=t), sh.sel(time=t), region)
             # number of pixels spatially aligned between coarse and fine resolution images
-            spatial_match_thresh = 90
-            spatial_match = slr_.where(shr_.rio.reproject_match(slr_,).notnull()).notnull().sum()
+            spatial_match_thresh = 0.7
+            overlapped = xr.where(slr_.notnull() & shr_.rio.reproject_match(slr_).notnull(), 1, 0).sum().data
+            valid = xr.where(slr_.notnull() | shr_.rio.reproject_match(slr_).notnull(), 1, 0).sum().data
+            spatial_match = overlapped / valid if valid > 0 else 0.0
             if slr_.notnull().any() and shr_.notnull().any() and spatial_match > spatial_match_thresh:
                 data0.append(y0.T)
                 data.append(ys.T)
