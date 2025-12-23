@@ -1,0 +1,28 @@
+[project]
+name = "smapsr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "diffrax>=0.7.0",
+    "einops>=0.8.1",
+    "equinox>=0.13.2",
+    "geopandas>=1.1.1",
+    "ipython>=9.6.0",
+    "jax[cuda12]>=0.7.2",
+    "jaxlib>=0.7.2",
+    "jupyter>=1.1.1",
+    "jupytext>=1.17.3",
+    "netcdf4>=1.7.3",
+    "numpy>=2.3.3",
+    "optax>=0.2.6",
+    "pygmt>=0.17.0",
+    "rasterio>=1.4.3",
+    "rioxarray>=0.19.0",
+    "scikit-image>=0.25.2",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
+    "xarray>=2025.10.1",
+]
