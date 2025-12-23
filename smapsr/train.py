@@ -45,7 +45,7 @@ def dataloader(arrays, batch_size, *, key, shuffle=True):
             perm = jr.permutation(key, indices)
         else:
             perm = indices
-        (key,) = jr.split(key, 1)
+        key, = jr.split(key)
         end = min(start + batch_size, dataset_size)
         while start < dataset_size:
             batch_perm = perm[start:end]
