@@ -26,4 +26,5 @@ generation of high-resolution soil moisture maps.
 This repository contains the following directories and files:
 
 * `smapsr`: contains the implementation of the Neural ODE framework
-* `env`: Nix flake files to reproduce the environment
+* `devenv.*`: devenv files to reproduce the environment
+* `pyproject.toml`; `uv.lock`: uv files for python environment
