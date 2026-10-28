@@ -1,4 +1,5 @@
 /smapsr/__pycache__/
+/experiments/__pycache__/
 /*.nc
 /.devenv*
 /*.csv
