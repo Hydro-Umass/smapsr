@@ -17,10 +17,14 @@ cache. Extras when the source carries them (data_qc does): retrieval_qual_flag (
 swath cell was near — bits NOT decoded here) and soil_moisture_qc (labels, composite after dropping pixels
 whose flag has --qc-mask bits set; see mosaic_daily.py).
 
-Needs the daily composites first:  python mosaic_daily.py --data-root data_qc
+Needs the daily composites first:  python mosaic_daily.py --data-root data_qc [--pass AM]
+
+--pass AM reads the AM-only composites (smap{3,1}km_daily_AM; days with no AM scene drop out) and writes the
+whole cache to <src-root>/cache/aligned_AM/ (the 9/36-km L3 fields are AM already and are copied as is).
 
 Usage:
     python smapsr/scripts/build_aligned_cache.py                                   # data_qc -> data_qc/cache/aligned
+    python smapsr/scripts/build_aligned_cache.py --pass AM                  # AM-only labels -> data_qc/cache/aligned_AM
     python smapsr/scripts/build_aligned_cache.py --scales 3km 1km --start 2021-01-01 --end 2021-03-31
     python smapsr/scripts/build_aligned_cache.py --src-root data --out-root /scratch/x   # rebuild from the old data
 """
@@ -110,9 +114,9 @@ def place(x, shape, off):
     return a
 
 
-def build_label(src, out, scale, start, end, overwrite):
+def build_label(src, out, scale, start, end, overwrite, suffix=""):
     spec = LABEL[scale]
-    files = {DAILY_DATE.search(f.name).group(1): f for f in sorted((src / spec["src"]).glob("*_daily.nc"))}
+    files = {DAILY_DATE.search(f.name).group(1): f for f in sorted((src / (spec["src"] + suffix)).glob("*_daily.nc"))}
     files = {d: f for d, f in files.items() if in_range(d, start, end)}
     out.mkdir(parents=True, exist_ok=True)
     n_new = 0
@@ -139,20 +143,25 @@ def main():
     ap.add_argument("--scales", nargs="+", default=["9km", "36km", "3km", "1km"], choices=["9km", "36km", "3km", "1km"])
     ap.add_argument("--start", default=None, help="YYYY-MM-DD, inclusive")
     ap.add_argument("--end", default=None, help="YYYY-MM-DD, inclusive")
+    ap.add_argument("--pass", dest="pass_", choices=["AM", "PM"], default=None,
+                    help="use the single-pass label composites (smap{3,1}km_daily_<pass>) and write cache/aligned_<pass>")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
 
     src = Path(args.src_root)
-    out_root = Path(args.out_root) if args.out_root else src / "cache" / "aligned"
+    suffix = f"_{args.pass_}" if args.pass_ else ""
+    out_root = Path(args.out_root) if args.out_root else src / "cache" / f"aligned{suffix}"
     start = args.start.replace("-", "") if args.start else None
     end = args.end.replace("-", "") if args.end else None
     summary = {}
     for scale in args.scales:
-        fn = build_l3 if scale in L3 else build_label
-        summary[scale] = fn(src, out_root / scale, scale, start, end, args.overwrite)
+        if scale in L3:
+            summary[scale] = build_l3(src, out_root / scale, scale, start, end, args.overwrite)
+        else:
+            summary[scale] = build_label(src, out_root / scale, scale, start, end, args.overwrite, suffix)
         print(scale, summary[scale], flush=True)
     prov = dict(generator="smapsr/scripts/build_aligned_cache.py", created=datetime.now().isoformat(timespec="seconds"),
-                src_root=str(src), start=args.start, end=args.end, scales=summary)
+                src_root=str(src), label_pass=args.pass_ or "all", start=args.start, end=args.end, scales=summary)
     (out_root / f"PROVENANCE_{datetime.now():%Y%m%dT%H%M%S}.json").write_text(json.dumps(prov, indent=1))
 
 
