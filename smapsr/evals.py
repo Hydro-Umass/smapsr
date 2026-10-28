@@ -143,9 +143,9 @@ def load(filename, mask):
         model, dmean, dstd = make(mask=mask, key=jr.PRNGKey(0), **hyperparams)
         return eqx.tree_deserialise_leaves(f, model), dmean, dstd
 
-def make_v1(*, key, in_channels, strides, width, depth, groups, n_freq, n_steps, data_mean, data_std):
+def make_v1(*, key, in_channels, strides, width, depth, groups, n_freq, n_steps, data_mean, data_std, kernel=3):
     """V1 counterpart of `make`: no mask or geometry, the arguments are the hyperparameters saved with the model."""
-    model = NeuralODEV1(in_channels, tuple(strides), width, depth, groups, n_freq, n_steps, key=key)
+    model = NeuralODEV1(in_channels, tuple(strides), width, depth, groups, n_freq, n_steps, kernel, key=key)
     return model, data_mean, data_std
 
 def load_v1(filename):

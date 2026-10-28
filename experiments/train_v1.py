@@ -49,6 +49,7 @@ def parse_args():
     p.add_argument("--width", type=int, default=32)
     p.add_argument("--depth", type=int, default=4)
     p.add_argument("--groups", type=int, default=8)
+    p.add_argument("--kernel", type=int, default=3, help="conv kernel size of the vector field (receptive field per evaluation = (depth + 1) * (kernel - 1) / 2 fine cells)")
     p.add_argument("--n-freq", type=int, default=4)
     p.add_argument("--n-steps", type=int, default=10, help="solver steps over t in [0, 1] (about 6 n + 1 function evaluations)")
     p.add_argument("--steps", type=int, default=2000, help="optimiser updates (batches, not epochs)")
@@ -102,9 +103,9 @@ def main():
 
     strides = (args.factor,)
     hyper = dict(in_channels=2, strides=list(strides), width=args.width, depth=args.depth, groups=args.groups,
-                 n_freq=args.n_freq, n_steps=args.n_steps)
-    model = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, key=jr.PRNGKey(args.seed))
-    reference = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, key=jr.PRNGKey(0))  # untrained = bilinear
+                 n_freq=args.n_freq, n_steps=args.n_steps, kernel=args.kernel)
+    model = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, key=jr.PRNGKey(args.seed))
+    reference = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, key=jr.PRNGKey(0))  # untrained = bilinear
     n_params = sum(a.size for a in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
     eval_fn = None

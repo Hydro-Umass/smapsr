@@ -146,10 +146,10 @@ class NeuralODEV1(eqx.Module):
     n_steps: int = eqx.field(static=True)
     n_freq: int = eqx.field(static=True)
 
-    def __init__(self, in_channels=2, strides=(3,), width=32, depth=4, groups=8, n_freq=4, n_steps=10, *, key):
+    def __init__(self, in_channels=2, strides=(3,), width=32, depth=4, groups=8, n_freq=4, n_steps=10, kernel=3, *, key):
         k1, k2 = jr.split(key)
         self.upsampler = Upsampler(in_channels, strides, key=k1)
-        self.func = ConvFunc(width, depth, groups, cond_dim=2 * n_freq + 2, key=k2)
+        self.func = ConvFunc(width, depth, groups, cond_dim=2 * n_freq + 2, kernel=kernel, key=k2)
         self.n_steps = n_steps
         self.n_freq = n_freq
 

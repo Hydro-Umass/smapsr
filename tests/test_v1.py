@@ -211,3 +211,17 @@ def test_train_v1_smoke_runs_and_updates_parameters(cache):
     before = jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array))
     after = jax.tree_util.tree_leaves(eqx.filter(trained, eqx.is_inexact_array))
     assert any(float(jnp.abs(a - b).max()) > 0 for a, b in zip(before, after))
+
+
+def test_kernel_size_changes_the_vector_field_only_and_roundtrips(tmp_path):
+    from smapsr import evals
+    import equinox as eqx
+    m3 = NeuralODEV1(2, (3,), width=8, depth=2, groups=4, n_steps=2, kernel=3, key=jr.PRNGKey(0))
+    m5 = NeuralODEV1(2, (3,), width=8, depth=2, groups=4, n_steps=2, kernel=5, key=jr.PRNGKey(0))
+    assert m5.func.convs[1].weight.shape[-1] == 5 and m3.func.convs[1].weight.shape[-1] == 3
+    assert m5.upsampler.layers[0].weight.shape == m3.upsampler.layers[0].weight.shape
+    hyper = dict(in_channels=2, strides=[3], width=8, depth=2, groups=4, n_freq=4, n_steps=2, kernel=5, data_mean=0.3, data_std=0.1)
+    evals.save(tmp_path / "m.eqx", hyper, m5)
+    back, _, _ = evals.load_v1(tmp_path / "m.eqx")
+    assert back.func.convs[0].weight.shape[-1] == 5
+    assert all(np.array_equal(a, b) for a, b in zip(jax.tree_util.tree_leaves(eqx.filter(back, eqx.is_array)), jax.tree_util.tree_leaves(eqx.filter(m5, eqx.is_array))))
