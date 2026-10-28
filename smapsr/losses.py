@@ -34,7 +34,7 @@ def _prepare_mask(mask, batch_size):
     else:
         raise ValueError(f"Mask must be 2D (H,W) or 3D (B,H,W), got {mask.ndim}D")
 
-def masked_ssim(img1, img2, mask, max_val=1.0, kernel_size=11, sigma=1.5, k1=0.01, k2=0.03):
+def masked_ssim(img1, img2, mask, max_val=1.0, kernel_size=11, sigma=1.5, k1=0.01, k2=0.03, min_valid_fraction=0.0):
     """
     Computes SSIM for batched single-channel images with missing data.
 
@@ -45,6 +45,8 @@ def masked_ssim(img1, img2, mask, max_val=1.0, kernel_size=11, sigma=1.5, k1=0.0
         max_val: Maximum pixel value
         kernel_size, sigma: Gaussian kernel parameters
         k1, k2: SSIM stability constants
+        min_valid_fraction: only windows whose Gaussian-weighted valid fraction is at least this count towards
+            the average (0 = every valid pixel, the original behaviour; strategy equation 5 uses 0.5)
 
     Returns:
         SSIM values for each image in batch (shape [B])
@@ -86,11 +88,28 @@ def masked_ssim(img1, img2, mask, max_val=1.0, kernel_size=11, sigma=1.5, k1=0.0
     ssim_map = numerator / denominator
     # Average over valid regions
     valid_pixels = jax.vmap(conv_fn)(mask, jnp.ones_like(mask))  # Convolve mask with kernel
-    return jnp.sum(ssim_map * mask, axis=(-2, -1)) / jnp.maximum(jnp.sum(mask, axis=(-2, -1)), 1e-12)
+    weight = mask * (valid_pixels >= min_valid_fraction) if min_valid_fraction > 0 else mask
+    return jnp.sum(ssim_map * weight, axis=(-2, -1)) / jnp.maximum(jnp.sum(weight, axis=(-2, -1)), 1e-12)
 
 def masked_ssim_loss(img1, img2, mask, **kwargs):
     """SSIM loss (1 - SSIM) for batched inputs."""
     return 1 - jnp.mean(masked_ssim(img1, img2, mask, **kwargs))
+
+def masked_daily_loss(pred, y, mask, data_range, ssim_weight=0.5, min_valid_fraction=0.5):
+    """Per-date masked loss of the V1 protocol (strategy equation 5, amendment A1), averaged over dates.
+
+    pred, y: (B, H, W); mask: (B, H, W), 1 where the label is valid. For each date,
+    (1 - w) * sum(M (pred - y)^2) / sum(M) + w * (1 - SSIM_M(pred, y)), with w = ssim_weight (V0 used 0.5 / 0.5).
+    Labels are never gap-filled: y is zero-filled where M = 0 (NaN * 0 = NaN) and dates without any valid
+    pixel are left out of the average. `data_range` is the dynamic range of y in the units given."""
+    m = mask.astype(pred.dtype)
+    y = jnp.where(m > 0, y, 0.0)
+    n = jnp.sum(m, axis=(-2, -1))
+    mse = jnp.sum(m * (pred - y) ** 2, axis=(-2, -1)) / jnp.maximum(n, 1.0)
+    ssim = masked_ssim(pred, y, m, max_val=data_range, min_valid_fraction=min_valid_fraction)
+    per_date = (1.0 - ssim_weight) * mse + ssim_weight * (1.0 - ssim)
+    has = (n > 0).astype(pred.dtype)
+    return jnp.sum(has * per_date) / jnp.maximum(jnp.sum(has), 1.0)
 
 def batch_correlation_masked(arr1, arr2, mask):
     """

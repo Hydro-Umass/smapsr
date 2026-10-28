@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
 from smapsr.train import prepare_data
-from smapsr.models import NeuralODE
+from smapsr.models import NeuralODE, NeuralODEV1
 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 from tqdm import tqdm
 
@@ -141,6 +141,18 @@ def load(filename, mask):
     with open(filename, "rb") as f:
         hyperparams = json.loads(f.readline().decode())
         model, dmean, dstd = make(mask=mask, key=jr.PRNGKey(0), **hyperparams)
+        return eqx.tree_deserialise_leaves(f, model), dmean, dstd
+
+def make_v1(*, key, in_channels, strides, width, depth, groups, n_freq, n_steps, data_mean, data_std):
+    """V1 counterpart of `make`: no mask or geometry, the arguments are the hyperparameters saved with the model."""
+    model = NeuralODEV1(in_channels, tuple(strides), width, depth, groups, n_freq, n_steps, key=key)
+    return model, data_mean, data_std
+
+def load_v1(filename):
+    """Load a V1 model saved with `save` (hyperparameters = the keyword arguments of `make_v1` except `key`)."""
+    with open(filename, "rb") as f:
+        hyperparams = json.loads(f.readline().decode())
+        model, dmean, dstd = make_v1(key=jr.PRNGKey(0), **hyperparams)
         return eqx.tree_deserialise_leaves(f, model), dmean, dstd
 
 def ssim_with_mask(img1, img2, mask, window_size=11, sigma=1.5, k1=0.01, k2=0.03, data_range=1.0):

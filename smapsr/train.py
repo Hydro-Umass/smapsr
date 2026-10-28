@@ -9,7 +9,7 @@ import optax
 import equinox as eqx
 from rasterio.enums import Resampling
 from smapsr.models import NeuralODE
-from smapsr.losses import masked_ssim_loss, mae_loss, gradient_loss, corr_loss_masked, mse_loss
+from smapsr.losses import masked_ssim_loss, mae_loss, gradient_loss, corr_loss_masked, mse_loss, masked_daily_loss
 
 def prepare_data(sl, sh, region):
     """Prepare data for super-resolution.
@@ -121,3 +121,43 @@ def train(sl, sh, region, train_period, width_size=64, depth=3, lr=1e-3, steps=1
         if ((step + 1) % print_every) == 0 or step == steps - 1:
             print(f"Step: {step+1}, Loss: {loss}, Time elapsed: {end - start}")
     return model, m, s
+
+
+def train_v1(model, pairs, *, scale_km, steps=2000, batch_size=8, lr=1e-3, clip_norm=1.0, ssim_weight=0.5,
+             min_valid_fraction=0.5, seed=0, print_every=50, eval_every=0, eval_fn=None):
+    """Train a NeuralODEV1 on daily masked crops (amendment A1; V0 `train` above is unchanged).
+
+    pairs: a smapsr.data.DailyPairs. One step is one optimiser update on one batch of random crops (`steps`
+    counts batches, not epochs). Loss: masked_daily_loss in normalised units (data range from `pairs`), AdaBelief
+    like V0 plus global-norm gradient clipping (`clip_norm`, None to disable). `eval_fn(model, step)` is called every
+    `eval_every` steps (and at the end) and must return a dict that is stored in the history.
+    Returns (model, history) with history a list of dicts (step, loss, seconds, plus eval_fn entries)."""
+    rng = np.random.default_rng(seed)
+    data_range = pairs.data_range
+    tx = [optax.clip_by_global_norm(clip_norm)] if clip_norm else []
+    optim = optax.chain(*tx, optax.adabelief(lr))
+    opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
+
+    @eqx.filter_value_and_grad
+    def grad_loss(model, x, y, m):
+        pred = jax.vmap(model, in_axes=(0, None))(x, scale_km)[:, 0]
+        return masked_daily_loss(pred, y[:, 0], m, data_range, ssim_weight, min_valid_fraction)
+
+    @eqx.filter_jit
+    def make_step(model, opt_state, x, y, m):
+        loss, grads = grad_loss(model, x, y, m)
+        updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
+        return loss, eqx.apply_updates(model, updates), opt_state
+
+    history = []
+    for step in range(1, steps + 1):
+        x, y, m, _ = pairs.sample(batch_size, rng)
+        t0 = time.time()
+        loss, model, opt_state = make_step(model, opt_state, jnp.asarray(x), jnp.asarray(y), jnp.asarray(m))
+        row = dict(step=step, loss=float(loss), seconds=time.time() - t0)
+        if eval_fn is not None and ((eval_every and step % eval_every == 0) or step == steps):
+            row.update(eval_fn(model, step))
+        history.append(row)
+        if step % print_every == 0 or step == steps:
+            print(f"Step: {step}, Loss: {row['loss']:.4f}" + "".join(f", {k}: {v:.4f}" for k, v in row.items() if k not in ("step", "loss", "seconds")), flush=True)
+    return model, history
