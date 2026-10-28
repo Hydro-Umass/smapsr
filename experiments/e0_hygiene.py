@@ -315,15 +315,7 @@ def main():
     day_pass = scenes.groupby("date")["pass"].agg(lambda s: set(s))
     ld["has_PM"] = ld["date"].map(lambda d: "PM" in day_pass.get(d, set()))
     ld["no_AM"] = ld["date"].map(lambda d: "AM" not in day_pass.get(d, set()))
-    ld.to_csv(run_dir / "figure_data" / "label_days.csv", index=False)
-    by_year = ld.groupby("year").agg(label_days=("date", "size"), label_days_with_S1B=("has_S1B", "sum"),
-                                     label_days_S1A_only=("only_S1A", "sum"), label_days_with_PM_scene=("has_PM", "sum"),
-                                     label_days_without_AM_scene=("no_AM", "sum"))
-    sc = scenes.groupby([scenes["date"].dt.year, "satellite"]).size().unstack(fill_value=0)
-    by_year = by_year.join(sc.add_prefix("scenes_")).fillna(0).astype(int)
-    by_split = ld.groupby("split").size().rename("label_days")
-    by_year.to_csv(run_dir / "label_days_per_year.csv")
-    by_split.to_csv(run_dir / "label_days_per_split.csv")
+    # label-day tables are written after the product scan: a label-day needs >= 1 valid pixel
 
     # --- ground stations ---------------------------------------------------------------
     sites = io.read_sites(root / "sites.txt")
@@ -353,8 +345,28 @@ def main():
     cov["frac_of_union"] = cov.apply(lambda r: r["n_valid"] / union[r["product"]].sum(), axis=1)
     cov["split"] = splits_of(cov["date"])
     cov.to_csv(run_dir / "figure_data" / "coverage_per_date.csv", index=False)
+
+    # --- label-days: days with >= 1 valid 3-km pixel. Days whose scenes are all PM passes hold no
+    # valid pixel (the L2 fields are AM-only), so counting days with scenes overstates label-days.
+    n3 = cov[cov["product"] == "SPL2SMAP_S_3km"].set_index("date")["n_valid"]
+    ld["n_valid_3km"] = ld["date"].map(n3).fillna(0).astype(int)
+    ld["has_labels"] = ld["n_valid_3km"] > 0
+    ld.to_csv(run_dir / "figure_data" / "label_days.csv", index=False)
+    lab = ld[ld["has_labels"]]
+    by_year = lab.groupby("year").agg(label_days=("date", "size"), label_days_with_S1B=("has_S1B", "sum"),
+                                      label_days_S1A_only=("only_S1A", "sum"), label_days_with_PM_scene=("has_PM", "sum"),
+                                      label_days_without_AM_scene=("no_AM", "sum"))
+    by_year = by_year.join(ld.groupby("year").agg(days_with_scenes=("date", "size"),
+                                                  scene_days_without_valid_pixels=("has_labels", lambda x: int((~x).sum()))))
+    sc = scenes.groupby([scenes["date"].dt.year, "satellite"]).size().unstack(fill_value=0)
+    by_year = by_year.join(sc.add_prefix("scenes_")).fillna(0).astype(int)
+    by_split = lab.groupby("split").size().rename("label_days")
+    by_year.to_csv(run_dir / "label_days_per_year.csv")
+    by_split.to_csv(run_dir / "label_days_per_split.csv")
+
     cov["year"] = cov["date"].dt.year
-    cov_year = cov.groupby(["product", "year"]).agg(
+    # the label products' empty (PM-only) days are not label-days, so they stay out of the coverage statistics
+    cov_year = cov[~(cov["product"].str.startswith("SPL2SMAP_S") & (cov["n_valid"] == 0))].groupby(["product", "year"]).agg(
         n_dates=("date", "size"), median_frac_of_union=("frac_of_union", "median"),
         frac_days_lt2pct_box=("frac_of_box", lambda x: np.mean(x < 0.02)),
         frac_days_ge10pct_box=("frac_of_box", lambda x: np.mean(x >= 0.10)))
@@ -447,6 +459,8 @@ def main():
                   sites=sites.to_dict("records"), sites_without_data=sorted(set(sites["site"]) - set(ground)),
                   protocol=dict(
                       split="flipped: train 2021-2024 minus SlimSAR window, test 2016-2020 (AGENTS.md §8)",
+                      label_days="days with >= 1 valid pixel in the all-pass 3-km daily composite (days with scenes only from PM "
+                                 "passes are empty and excluded; counts of days with scenes are kept as days_with_scenes)",
                       insitu_matching=f"mean of in-situ samples within ±{args.window_min} min of {args.overpass_local_hour:g}:00 local solar time "
                                       "on the morning after the UTC date token (= ~18 UTC on that date); product value = mean of valid "
                                       f"cells centred within each buffer radius {args.buffer_km} km of the site (plus the nearest cell; "
