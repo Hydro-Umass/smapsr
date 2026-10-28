@@ -47,6 +47,68 @@ def ubrmse(obs, pred):
     rmse = np.sqrt(np.mean((obs - pred)**2))
     return np.sqrt(rmse**2 - bias**2)
 
+def point_metrics(obs, pred):
+    """N, Pearson R, RMSE, ubRMSE and bias (pred - obs) over pairs where both are finite."""
+    obs = np.asarray(obs, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+    ok = np.isfinite(obs) & np.isfinite(pred)
+    obs, pred = obs[ok], pred[ok]
+    n = obs.size
+    if n < 3:
+        return dict(N=n, R=np.nan, RMSE=np.nan, ubRMSE=np.nan, bias=np.nan)
+    d = pred - obs
+    r = np.corrcoef(obs, pred)[0, 1] if obs.std() > 0 and pred.std() > 0 else np.nan
+    return dict(N=n, R=r, RMSE=np.sqrt(np.mean(d**2)), ubRMSE=np.std(d), bias=np.mean(d))
+
+def date_blocks(dates, block_days):
+    """Integer block id per date: consecutive calendar windows of `block_days` days."""
+    days = pd.DatetimeIndex(dates).normalize()
+    return ((days - days.min()).days // block_days).to_numpy()
+
+def block_bootstrap(stat, blocks, n_boot=2000, seed=0):
+    """Moving-calendar-block bootstrap: resample whole blocks with replacement.
+
+    `stat(idx)` returns a dict of floats for the rows `idx`; blocks keep serially
+    correlated days together so CIs are not overconfident. Returns {key: array(n_boot)}."""
+    rng = np.random.default_rng(seed)
+    blocks = np.asarray(blocks)
+    ids = np.unique(blocks)
+    rows = [np.flatnonzero(blocks == b) for b in ids]
+    out = {}
+    for _ in range(n_boot):
+        pick = rng.integers(0, len(ids), len(ids))
+        res = stat(np.concatenate([rows[i] for i in pick]))
+        for k, v in res.items():
+            out.setdefault(k, []).append(v)
+    return {k: np.asarray(v, dtype=float) for k, v in out.items()}
+
+def ci(samples, level=0.95):
+    """Percentile interval of bootstrap samples, ignoring NaNs."""
+    a = (1 - level) / 2
+    s = np.asarray(samples, dtype=float)
+    s = s[np.isfinite(s)]
+    if s.size == 0:
+        return np.nan, np.nan
+    return tuple(np.quantile(s, [a, 1 - a]))
+
+def paired_p(diff_samples):
+    """Two-sided bootstrap p-value for H0: difference = 0 (percentile method)."""
+    s = np.asarray(diff_samples, dtype=float)
+    s = s[np.isfinite(s)]
+    if s.size == 0:
+        return np.nan
+    return min(1.0, 2 * min(np.mean(s <= 0), np.mean(s >= 0)))
+
+def spatial_corr(a, b, min_pixels=100):
+    """Pearson R between two fields over pixels finite in both (NaN if too few)."""
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < min_pixels:
+        return np.nan
+    x, y = a[ok], b[ok]
+    if x.std() == 0 or y.std() == 0:
+        return np.nan
+    return np.corrcoef(x, y)[0, 1]
+
 def split_into_tiles(data_array, tile_size):
     """Partition data array in tiles for training."""
     x_coords = data_array.x.data
