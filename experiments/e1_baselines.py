@@ -49,7 +49,9 @@ def build_parser():
     p.add_argument("--block-days", type=int, default=30)
     p.add_argument("--n-boot", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--v1", nargs="*", default=[], help="train_v1 run directories (results/v1_train/run_*); each is evaluated as v1_<n> on the full grid")
+    p.add_argument("--v1", nargs="*", default=[], help="train_v1 run directories (results/v1_train/run_*); each is evaluated as v1_<n>")
+    p.add_argument("--v1-tile", type=int, default=32, help="V1 inference tile in coarse cells (= training crop; 0 = full grid, which GroupNorm penalises)")
+    p.add_argument("--v1-halo", type=int, default=8, help="V1 inference halo in coarse cells around each tile")
     p.add_argument("--limit", type=int, default=0, help="debug: use only the first N dates of each period")
     return p
 
@@ -86,20 +88,37 @@ def pooled(s):
     return dict(R=r, RMSE=np.sqrt(mse), uRMSE=np.sqrt(np.maximum(mse - bias**2, 0)), bias=bias)
 
 
-def load_v1_models(run_dirs):
-    """{name: fn(coarse day in m3/m3, NaN gaps) -> fine field in m3/m3} for trained V1 runs (full-grid inference)."""
+def tiled(fwd, x, tile, halo, factor):
+    """Predict (H*f, W*f) from x (C, h, w) with tiles of `tile` coarse cells plus a `halo` on each side (zero input
+    and zero validity outside the domain). Matches the training crop extent, which GroupNorm is sensitive to."""
+    import jax.numpy as jnp
+    _, h, w = x.shape
+    out = np.zeros((h * factor, w * factor), dtype=np.float32)
+    pad = np.pad(x, ((0, 0), (halo, halo), (halo, halo)))
+    for i in range(0, h, tile):
+        for j in range(0, w, tile):
+            ti, tj = min(tile, h - i), min(tile, w - j)
+            y = np.asarray(fwd(jnp.asarray(pad[:, i:i + ti + 2 * halo, j:j + tj + 2 * halo])))[0]
+            out[i * factor:(i + ti) * factor, j * factor:(j + tj) * factor] = y[halo * factor:(halo + ti) * factor, halo * factor:(halo + tj) * factor]
+    return out
+
+
+def load_v1_models(run_dirs, tile=32, halo=8):
+    """{name: fn(coarse day in m3/m3, NaN gaps) -> fine field in m3/m3} for trained V1 runs (tiled inference unless tile=0)."""
     import jax
     import jax.numpy as jnp
     out = {}
     for n, d in enumerate(run_dirs):
         cfg = json.loads((Path(d) / "config.json").read_text())
         model, mean, std = evals.load_v1(Path(d) / "models" / "model.eqx")
-        scale = float(cfg["args"]["scale_km"])
+        scale, factor = float(cfg["args"]["scale_km"]), int(cfg["args"]["factor"])
         fwd = jax.jit(lambda x, m=model: m(x, scale))
 
         def fn(c, fwd=fwd, mean=mean, std=std):
             v = np.isfinite(c)
             x = np.stack([np.where(v, (c - mean) / std, 0.0), v.astype(np.float32)]).astype(np.float32)
+            if tile:
+                return tiled(fwd, x, tile, halo, factor) * std + mean
             return np.asarray(fwd(jnp.asarray(x))[0]) * std + mean
         out[f"v1_{n}"] = fn
     return out
@@ -137,7 +156,7 @@ def git_sha(repo):
 def main():
     a = parse_args()
     t0 = time.time()
-    v1 = load_v1_models(a.v1)
+    v1 = load_v1_models(a.v1, a.v1_tile, a.v1_halo)
     methods = BASE_METHODS + list(v1)
     excl = [pd.Timestamp(d) + pd.Timedelta(days=k) for d in a.exclude_dates
             for k in range(-a.exclude_buffer_days, a.exclude_buffer_days + 1)]
@@ -276,7 +295,7 @@ def main():
     pd.DataFrame(dict(date=test_used, **{f"n_{s}": val[:, 0, i, 0] for i, s in enumerate(SUBSETS)})).to_csv(run / "test_dates.csv", index=False)
     cfg = dict(args=vars(a), n_train_dates=n_train, n_test_label_days=len(test_used), covered_pixels=int(covered.sum()),
                total_pixels=int(covered.size), pooled_pixel_days={s: int(val[:, 0, i, 0].sum()) for i, s in enumerate(SUBSETS)},
-               time_mean_pixels=int(tm_ok.sum()), clip=CLIP, methods=methods, v1_runs=[str(x) for x in a.v1], git=git_sha("smapsr"), runtime_s=round(time.time() - t0, 1),
+               time_mean_pixels=int(tm_ok.sum()), clip=CLIP, methods=methods, v1_runs=[str(x) for x in a.v1], v1_tile=a.v1_tile, v1_halo=a.v1_halo, git=git_sha("smapsr"), runtime_s=round(time.time() - t0, 1),
                train_dates=[str(d.date()) for d in train], note="trained baselines, in-situ reference, SSIM/PSNR and V1 are later stages")
     (run / "config.json").write_text(json.dumps(cfg, indent=2))
     show = metrics[metrics.metric.isin(["R", "RMSE", "uRMSE", "bias", "daily_R_median", "anomaly_R", "anomaly_R_pixmean", "time_mean_R"]) & ~metrics.method.str.contains("-")]

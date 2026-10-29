@@ -38,7 +38,7 @@ def main():
     p.add_argument("--min-insitu-samples", type=int, default=1)
     a = p.parse_args()
     t0 = time.time()
-    v1 = e1.load_v1_models(a.v1)
+    v1 = e1.load_v1_models(a.v1, a.v1_tile, a.v1_halo)
     methods = e1.BASE_METHODS + list(v1)
     clim, n_train = e1.fit_climatology(a, e1.train_dates(a))
     C = clim.label_mean
@@ -124,7 +124,7 @@ def main():
     mu.to_csv(run / "matchups.csv", index=False)
     cfg = dict(args=vars(a), methods=methods, n_train_dates=n_train, sites=sites.site.tolist(),
                n_cells_in_buffer=[len(c[0]) for c in cells], n_matchups={k: int(v.sum()) for k, v in sub.items()},
-               per_site_n={k: int(g.shape[0]) for k, g in mu[sub["common"]].groupby("site")}, v1_runs=a.v1,
+               per_site_n={k: int(g.shape[0]) for k, g in mu[sub["common"]].groupby("site")}, v1_runs=a.v1, v1_tile=a.v1_tile, v1_halo=a.v1_halo,
                grid="aligned 3 km, lat0 -32.77, lon0 164.67, step 0.03 (raw origin shifted one cell N/W)",
                git=e1.git_sha("smapsr"), runtime_s=round(time.time() - t0, 1))
     (run / "config.json").write_text(json.dumps(cfg, indent=2))
