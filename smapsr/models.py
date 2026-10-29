@@ -105,16 +105,18 @@ def scale_embedding(scale_km, n_freq):
 class ConvFunc(eqx.Module):
     """F_theta: small conv stack over a (1, H, W) state with GroupNorm, SiLU and FiLM scale/time conditioning.
 
-    Parameters depend on width/depth only (not on H, W). The last conv and every FiLM layer start at zero,
-    so the initial vector field is identically zero and u(1) = u(0). Zero padding at the crop edge."""
+    Parameters depend on width/depth (and the number of static channels) only, not on H, W. The last conv and every
+    FiLM layer start at zero, so the initial vector field is identically zero and u(1) = u(0). Zero padding at the
+    crop edge. `static_channels` > 0: fixed fine-grid fields (e.g. the label climatology) passed as args["static"]
+    (static_channels, H, W) are concatenated to the state before the first conv; they do not evolve."""
     convs: tuple
     norms: tuple
     films: tuple
     out: eqx.nn.Conv2d
 
-    def __init__(self, width, depth, groups, cond_dim, kernel=3, *, key):
+    def __init__(self, width, depth, groups, cond_dim, kernel=3, static_channels=0, *, key):
         keys = jr.split(key, 2 * depth + 1)
-        cins = [1] + [width] * (depth - 1)
+        cins = [1 + static_channels] + [width] * (depth - 1)
         self.convs = tuple(eqx.nn.Conv2d(c, width, kernel, padding="SAME", key=keys[i]) for i, c in enumerate(cins))
         self.norms = tuple(eqx.nn.GroupNorm(groups, width) for _ in range(depth))
         films = []
@@ -127,7 +129,7 @@ class ConvFunc(eqx.Module):
 
     def __call__(self, t, u, args):
         cond = jnp.concatenate([args["scale_emb"], jnp.asarray(t, dtype=jnp.float32)[None]])
-        h = u
+        h = jnp.concatenate([u, args["static"]]) if "static" in args else u
         for conv, norm, film in zip(self.convs, self.norms, self.films):
             h = norm(conv(h))
             gamma, beta = jnp.split(film(cond), 2)
@@ -138,27 +140,31 @@ class ConvFunc(eqx.Module):
 class NeuralODEV1(eqx.Module):
     """u(0) = U_phi(x_c);  du/dt = F_theta(u, t; e(s));  output u(1). No mask, no geometry in the model.
 
-    __call__(x, scale_km): x is (C_in, h, w) on the coarse grid, scale_km the target pixel size (only enters
-    through the Fourier embedding; one scale per run in stage 1). Returns the (1, H, W) fine field, H = h * prod(strides).
+    __call__(x, scale_km, static=None): x is (C_in, h, w) on the coarse grid, scale_km the target pixel size (only
+    enters through the Fourier embedding; one scale per run in stage 1), static the (static_channels, H, W) fine-grid
+    fields seen by F_theta (required iff static_channels > 0). Returns the (1, H, W) fine field, H = h * prod(strides).
     Solver: Tsitouras 5/4, constant step 1/n_steps (about 6 * n_steps + 1 function evaluations)."""
     upsampler: Upsampler
     func: ConvFunc
     n_steps: int = eqx.field(static=True)
     n_freq: int = eqx.field(static=True)
 
-    def __init__(self, in_channels=2, strides=(3,), width=32, depth=4, groups=8, n_freq=4, n_steps=10, kernel=3, *, key):
+    def __init__(self, in_channels=2, strides=(3,), width=32, depth=4, groups=8, n_freq=4, n_steps=10, kernel=3,
+                 static_channels=0, *, key):
         k1, k2 = jr.split(key)
         self.upsampler = Upsampler(in_channels, strides, key=k1)
-        self.func = ConvFunc(width, depth, groups, cond_dim=2 * n_freq + 2, kernel=kernel, key=k2)
+        self.func = ConvFunc(width, depth, groups, cond_dim=2 * n_freq + 2, kernel=kernel, static_channels=static_channels, key=k2)
         self.n_steps = n_steps
         self.n_freq = n_freq
 
     def initial_state(self, x):
         return self.upsampler(x)
 
-    def __call__(self, x, scale_km):
+    def __call__(self, x, scale_km, static=None):
         u0 = self.initial_state(x)
         args = dict(scale_emb=scale_embedding(scale_km, self.n_freq))
+        if static is not None and static.shape[0]:
+            args["static"] = static
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(self.func), diffrax.Tsit5(), t0=0.0, t1=1.0, dt0=1.0 / self.n_steps, y0=u0, args=args,
             stepsize_controller=diffrax.ConstantStepSize(), saveat=diffrax.SaveAt(t1=True),

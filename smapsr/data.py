@@ -11,7 +11,9 @@ a crop of c * factor fine cells with no resampling). Differences from V0's `prep
 * crops are random (no fixed geographic tile), drawn only where the crop holds enough labels *on the fine grid*
   and enough valid input cells, with probability proportional to the label count;
 * normalisation (mean, std) comes from the valid coarse pixels of the dates given at construction and is applied
-  unchanged to every other set (pass `norm=`), which is what a zero-shot protocol needs.
+  unchanged to every other set (pass `norm=`), which is what a zero-shot protocol needs;
+* optional static fine-grid channels (`set_static`): the training label climatology (`baselines.Climatology`:
+  label mean C, label-minus-bilinear anomaly A, validity), left-one-out on the dates that built it.
 """
 from pathlib import Path
 
@@ -19,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 CLIP = (0.01, 0.65)     # m3/m3, as in V0
+STATIC_CHANNELS = {"label_mean": 0, "anomaly": 1}   # index into Climatology.fields; validity (2) is always appended
 
 
 def _read(path):
@@ -71,7 +74,26 @@ class DailyPairs:
             v = np.concatenate([c[np.isfinite(c)] for c in self.coarse]).astype(np.float64)
             norm = (float(v.mean()), float(v.std()))
         self.mean, self.std = norm
+        self.clim, self.static = None, ()
         self._index_candidates(min_label_frac, min_input_frac, origin_stride)
+
+    def set_static(self, clim, names):
+        """Attach static channels `names` (keys of STATIC_CHANNELS; validity is appended whenever any is chosen).
+        Dates that built `clim` (added with date=) see it with their own day left out."""
+        bad = set(names) - set(STATIC_CHANNELS)
+        if bad:
+            raise ValueError(f"unknown static channels {bad}")
+        self.clim, self.static = clim, tuple(names)
+
+    @property
+    def static_channels(self):
+        return len(self.static) + 1 if self.static else 0
+
+    def static_crop(self, k, rows, cols):
+        if not self.static:
+            return np.zeros((0, rows.stop - rows.start, cols.stop - cols.start), dtype=np.float32)
+        f = self.clim.fields(self.mean, self.std, rows, cols, leave_out=self.dates[k])
+        return f[[STATIC_CHANNELS[n] for n in self.static] + [2]]
 
     def _index_candidates(self, min_label_frac, min_input_frac, stride):
         F, cr = self.factor, self.crop
@@ -107,7 +129,8 @@ class DailyPairs:
                     crop_coarse=self.crop, crop_fine=self.crop * self.factor)
 
     def crop_at(self, k, i, j):
-        """Normalised crop of date index k at coarse origin (i, j): x (2, c, c), y (1, cF, cF), mask (cF, cF).
+        """Normalised crop of date index k at coarse origin (i, j): x (2, c, c), y (1, cF, cF), mask (cF, cF),
+        s (static_channels, cF, cF).
 
         x[0] is the coarse data (0 where invalid), x[1] its validity; y is zero-filled where mask == 0."""
         F, cr = self.factor, self.crop
@@ -116,13 +139,15 @@ class DailyPairs:
         cv, fv = np.isfinite(c), np.isfinite(f)
         x = np.stack([np.where(cv, (c - self.mean) / self.std, 0.0), cv.astype(np.float32)]).astype(np.float32)
         y = np.where(fv, (f - self.mean) / self.std, 0.0)[None].astype(np.float32)
-        return x, y, fv.astype(np.float32)
+        s = self.static_crop(k, slice(i * F, (i + cr) * F), slice(j * F, (j + cr) * F))
+        return x, y, fv.astype(np.float32), s
 
     def sample(self, batch_size, rng):
-        """Draw a batch (with replacement); returns x (B,2,c,c), y (B,1,cF,cF), mask (B,cF,cF) and the dates."""
+        """Draw a batch (with replacement); returns x (B,2,c,c), y (B,1,cF,cF), mask (B,cF,cF), the dates and the
+        static channels s (B, static_channels, cF, cF; zero channels when none are set)."""
         k = np.minimum(np.searchsorted(self._cdf, rng.random(batch_size) * self._cdf[-1], side="right"), len(self._w) - 1)
-        xs, ys, ms = zip(*(self.crop_at(self._d[n], int(self._i[n]), int(self._j[n])) for n in k))
-        return np.stack(xs), np.stack(ys), np.stack(ms), [self.dates[self._d[n]] for n in k]
+        xs, ys, ms, ss = zip(*(self.crop_at(self._d[n], int(self._i[n]), int(self._j[n])) for n in k))
+        return np.stack(xs), np.stack(ys), np.stack(ms), [self.dates[self._d[n]] for n in k], np.stack(ss)
 
     def fixed(self, n, seed=0):
         """A reproducible batch of `n` crops (validation / monitoring)."""

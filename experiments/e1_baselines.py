@@ -88,38 +88,51 @@ def pooled(s):
     return dict(R=r, RMSE=np.sqrt(mse), uRMSE=np.sqrt(np.maximum(mse - bias**2, 0)), bias=bias)
 
 
-def tiled(fwd, x, tile, halo, factor):
-    """Predict (H*f, W*f) from x (C, h, w) with tiles of `tile` coarse cells plus a `halo` on each side (zero input
-    and zero validity outside the domain). Matches the training crop extent, which GroupNorm is sensitive to."""
+def tiled(fwd, x, tile, halo, factor, s):
+    """Predict (H*f, W*f) from x (C, h, w) and static fine-grid channels s (S, H*f, W*f) with tiles of `tile` coarse
+    cells plus a `halo` on each side (zero input, validity and static channels outside the domain). Matches the
+    training crop extent, which GroupNorm is sensitive to."""
     import jax.numpy as jnp
     _, h, w = x.shape
     out = np.zeros((h * factor, w * factor), dtype=np.float32)
     pad = np.pad(x, ((0, 0), (halo, halo), (halo, halo)))
+    hf = halo * factor
+    spad = np.pad(s, ((0, 0), (hf, hf), (hf, hf)))
     for i in range(0, h, tile):
         for j in range(0, w, tile):
             ti, tj = min(tile, h - i), min(tile, w - j)
-            y = np.asarray(fwd(jnp.asarray(pad[:, i:i + ti + 2 * halo, j:j + tj + 2 * halo])))[0]
+            st = spad[:, i * factor:(i + ti + 2 * halo) * factor, j * factor:(j + tj + 2 * halo) * factor]
+            y = np.asarray(fwd(jnp.asarray(pad[:, i:i + ti + 2 * halo, j:j + tj + 2 * halo]), jnp.asarray(st)))[0]
             out[i * factor:(i + ti) * factor, j * factor:(j + tj) * factor] = y[halo * factor:(halo + ti) * factor, halo * factor:(halo + tj) * factor]
     return out
 
 
 def load_v1_models(run_dirs, tile=32, halo=8):
-    """{name: fn(coarse day in m3/m3, NaN gaps) -> fine field in m3/m3} for trained V1 runs (tiled inference unless tile=0)."""
+    """{name: fn(coarse day in m3/m3, NaN gaps) -> fine field in m3/m3} for trained V1 runs (tiled inference unless tile=0).
+    Runs trained with static channels use their own saved training climatology (models/static.npz), in full."""
     import jax
     import jax.numpy as jnp
+    from smapsr.baselines import Climatology
+    from smapsr.data import STATIC_CHANNELS
     out = {}
     for n, d in enumerate(run_dirs):
         cfg = json.loads((Path(d) / "config.json").read_text())
         model, mean, std = evals.load_v1(Path(d) / "models" / "model.eqx")
         scale, factor = float(cfg["args"]["scale_km"]), int(cfg["args"]["factor"])
-        fwd = jax.jit(lambda x, m=model: m(x, scale))
+        names = cfg["args"].get("static") or []
+        fwd = jax.jit(lambda x, s, m=model: m(x, scale, s))
+        s_full = None
+        if names:
+            f = Climatology.load(Path(d) / "models" / "static.npz").fields(mean, std)
+            s_full = f[[STATIC_CHANNELS[k] for k in names] + [2]]
 
-        def fn(c, fwd=fwd, mean=mean, std=std):
+        def fn(c, fwd=fwd, mean=mean, std=std, s_full=s_full):
             v = np.isfinite(c)
             x = np.stack([np.where(v, (c - mean) / std, 0.0), v.astype(np.float32)]).astype(np.float32)
+            s = s_full if s_full is not None else np.zeros((0, c.shape[0] * factor, c.shape[1] * factor), np.float32)
             if tile:
-                return tiled(fwd, x, tile, halo, factor) * std + mean
-            return np.asarray(fwd(jnp.asarray(x))[0]) * std + mean
+                return tiled(fwd, x, tile, halo, factor, s) * std + mean
+            return np.asarray(fwd(jnp.asarray(x), jnp.asarray(s))[0]) * std + mean
         out[f"v1_{n}"] = fn
     return out
 
@@ -294,7 +307,7 @@ def main():
     metrics.to_csv(run / "metrics.csv", index=False)
     pd.DataFrame(dict(date=test_used, **{f"n_{s}": val[:, 0, i, 0] for i, s in enumerate(SUBSETS)})).to_csv(run / "test_dates.csv", index=False)
     cfg = dict(args=vars(a), n_train_dates=n_train, n_test_label_days=len(test_used), covered_pixels=int(covered.sum()),
-               total_pixels=int(covered.size), pooled_pixel_days={s: int(val[:, 0, i, 0].sum()) for i, s in enumerate(SUBSETS)},
+               total_pixels=int(covered.size), pooled_pixel_days={s: int(np.nansum(val[:, 0, i, 0])) for i, s in enumerate(SUBSETS)},
                time_mean_pixels=int(tm_ok.sum()), clip=CLIP, methods=methods, v1_runs=[str(x) for x in a.v1], v1_tile=a.v1_tile, v1_halo=a.v1_halo, git=git_sha("smapsr"), runtime_s=round(time.time() - t0, 1),
                train_dates=[str(d.date()) for d in train], note="trained baselines, in-situ reference, SSIM/PSNR and V1 are later stages")
     (run / "config.json").write_text(json.dumps(cfg, indent=2))

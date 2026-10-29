@@ -170,9 +170,9 @@ def test_pairs_skip_unusable_dates_and_normalise_with_given_stats(cache):
 
 def test_crops_are_aligned_masked_and_never_nan(cache):
     dp = DailyPairs(cache, pd.date_range("2021-03-01", periods=6), crop=8, min_label_frac=0.1, min_input_frac=0.2)
-    x, y, m, dates = dp.sample(32, np.random.default_rng(1))
+    x, y, m, dates, s = dp.sample(32, np.random.default_rng(1))
     assert x.shape == (32, 2, 8, 8) and y.shape == (32, 1, 24, 24) and m.shape == (32, 24, 24)
-    assert np.isfinite(x).all() and np.isfinite(y).all()
+    assert np.isfinite(x).all() and np.isfinite(y).all() and s.shape == (32, 0, 24, 24)
     assert (y[:, 0][m == 0] == 0).all()                                      # zero-filled where there is no label
     assert (x[:, 0][x[:, 1] == 0] == 0).all()                                # input gaps are the training mean (0), flagged in channel 1
     # every label pixel sits in its own coarse cell: the block-constant labels equal the coarse value after normalisation
@@ -185,8 +185,8 @@ def test_crops_are_aligned_masked_and_never_nan(cache):
 
 def test_eligibility_thresholds_and_label_coverage(cache):
     dp = DailyPairs(cache, pd.date_range("2021-03-01", periods=6), crop=8, min_label_frac=0.3, min_input_frac=0.5)
-    _, _, m, _ = dp.sample(64, np.random.default_rng(2))
-    x, _, _, _ = dp.sample(64, np.random.default_rng(2))
+    _, _, m, _, _ = dp.sample(64, np.random.default_rng(2))
+    x, _, _, _, _ = dp.sample(64, np.random.default_rng(2))
     assert (m.mean((1, 2)) >= 0.3 - 1e-9).all() and (x[:, 1].mean((1, 2)) >= 0.5 - 1e-9).all()
     with pytest.raises(ValueError):
         DailyPairs(cache, pd.date_range("2021-03-01", periods=6), crop=8, min_label_frac=0.99, min_input_frac=0.99)
@@ -225,3 +225,66 @@ def test_kernel_size_changes_the_vector_field_only_and_roundtrips(tmp_path):
     back, _, _ = evals.load_v1(tmp_path / "m.eqx")
     assert back.func.convs[0].weight.shape[-1] == 5
     assert all(np.array_equal(a, b) for a, b in zip(jax.tree_util.tree_leaves(eqx.filter(back, eqx.is_array)), jax.tree_util.tree_leaves(eqx.filter(m5, eqx.is_array))))
+
+
+# --- static climatology channels (decision 8) ------------------------------------------------------
+
+def _clim_from(dp):
+    from smapsr.baselines import Climatology
+    clim = Climatology(dp.fine[0].shape, dp.factor, min_count=2)
+    for d, c, f in zip(dp.dates, dp.coarse, dp.fine):
+        clim.add(c, f, date=d)
+    return clim
+
+
+def test_static_crops_are_leave_one_out(cache):
+    from smapsr.baselines import Climatology
+    dates = pd.date_range("2021-03-01", periods=6)
+    dp = DailyPairs(cache, dates, crop=8, min_label_frac=0.1, min_input_frac=0.2)
+    clim = _clim_from(dp)
+    dp.set_static(clim, ["label_mean", "anomaly"])
+    assert dp.static_channels == 3
+    k, i, j = 2, 4, 8
+    _, _, _, s = dp.crop_at(k, i, j)
+    # reference: the climatology rebuilt without date k, cropped
+    ref = Climatology(dp.fine[0].shape, dp.factor, min_count=2)
+    for n, (c, f) in enumerate(zip(dp.coarse, dp.fine)):
+        if n != k:
+            ref.add(c, f)
+    want = ref.fields(dp.mean, dp.std)[:, i * 3:(i + 8) * 3, j * 3:(j + 8) * 3]
+    assert np.allclose(s, want, atol=1e-5)
+    full = clim.fields(dp.mean, dp.std)[:, i * 3:(i + 8) * 3, j * 3:(j + 8) * 3]
+    assert not np.allclose(s, full)                                          # the day's own label is not in its input
+    # a set whose dates did not build the climatology sees it in full
+    other = DailyPairs(cache, dates, crop=8, min_label_frac=0.1, min_input_frac=0.2, norm=(dp.mean, dp.std))
+    other.set_static(_clim_from(DailyPairs(cache, dates[:3], crop=8, min_label_frac=0.1, min_input_frac=0.2)), ["anomaly"])
+    _, _, _, s2 = other.crop_at(4, i, j)
+    assert s2.shape == (2, 24, 24)
+
+
+def test_untrained_static_model_is_bilinear_and_trains(cache, tmp_path):
+    dp = DailyPairs(cache, pd.date_range("2021-03-01", periods=6), crop=8, min_label_frac=0.1, min_input_frac=0.2)
+    dp.set_static(_clim_from(dp), ["label_mean", "anomaly"])
+    model = NeuralODEV1(2, (3,), width=8, depth=2, groups=4, n_steps=2, static_channels=3, key=jr.PRNGKey(0))
+    x, _, _, _, s = dp.sample(2, np.random.default_rng(0))
+    u1 = jax.vmap(model, in_axes=(0, None, 0))(jnp.asarray(x), 3.0, jnp.asarray(s))
+    assert float(jnp.abs(u1 - jax.vmap(model.initial_state)(jnp.asarray(x))).max()) == 0.0
+    trained, history = train_v1(model, dp, scale_km=3.0, steps=3, batch_size=2, seed=0, print_every=100)
+    assert all(np.isfinite(h["loss"]) for h in history)
+    u1 = jax.vmap(trained, in_axes=(0, None, 0))(jnp.asarray(x), 3.0, jnp.asarray(s))
+    u1z = jax.vmap(trained, in_axes=(0, None, 0))(jnp.asarray(x), 3.0, jnp.zeros_like(jnp.asarray(s)))
+    assert float(jnp.abs(u1 - u1z).max()) > 0                                # the static channels reach the output
+    hyper = dict(in_channels=2, strides=[3], width=8, depth=2, groups=4, n_freq=4, n_steps=2, kernel=3, static_channels=3,
+                 static=["label_mean", "anomaly"], data_mean=0.3, data_std=0.1)
+    evals.save(tmp_path / "m.eqx", hyper, trained)
+    back, _, _ = evals.load_v1(tmp_path / "m.eqx")
+    assert back.func.convs[0].weight.shape[1] == 4
+
+
+def test_climatology_save_load_roundtrip(cache, tmp_path):
+    from smapsr.baselines import Climatology
+    dp = DailyPairs(cache, pd.date_range("2021-03-01", periods=6), crop=8, min_label_frac=0.1, min_input_frac=0.2)
+    clim = _clim_from(dp)
+    clim.save(tmp_path / "s.npz")
+    back = Climatology.load(tmp_path / "s.npz")
+    assert np.array_equal(back.fields(0.3, 0.1), clim.fields(0.3, 0.1))

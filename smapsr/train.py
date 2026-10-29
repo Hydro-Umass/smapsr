@@ -139,21 +139,21 @@ def train_v1(model, pairs, *, scale_km, steps=2000, batch_size=8, lr=1e-3, clip_
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
     @eqx.filter_value_and_grad
-    def grad_loss(model, x, y, m):
-        pred = jax.vmap(model, in_axes=(0, None))(x, scale_km)[:, 0]
+    def grad_loss(model, x, y, m, s):
+        pred = jax.vmap(model, in_axes=(0, None, 0))(x, scale_km, s)[:, 0]
         return masked_daily_loss(pred, y[:, 0], m, data_range, ssim_weight, min_valid_fraction)
 
     @eqx.filter_jit
-    def make_step(model, opt_state, x, y, m):
-        loss, grads = grad_loss(model, x, y, m)
+    def make_step(model, opt_state, x, y, m, s):
+        loss, grads = grad_loss(model, x, y, m, s)
         updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
         return loss, eqx.apply_updates(model, updates), opt_state
 
     history = []
     for step in range(1, steps + 1):
-        x, y, m, _ = pairs.sample(batch_size, rng)
+        x, y, m, _, s = pairs.sample(batch_size, rng)
         t0 = time.time()
-        loss, model, opt_state = make_step(model, opt_state, jnp.asarray(x), jnp.asarray(y), jnp.asarray(m))
+        loss, model, opt_state = make_step(model, opt_state, jnp.asarray(x), jnp.asarray(y), jnp.asarray(m), jnp.asarray(s))
         row = dict(step=step, loss=float(loss), seconds=time.time() - t0)
         if eval_fn is not None and ((eval_every and step % eval_every == 0) or step == steps):
             row.update(eval_fn(model, step))

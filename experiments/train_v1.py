@@ -5,6 +5,10 @@ SlimSAR window (and minus an optional validation block used only for monitoring)
 test period. Reports the validation error of the full model u(1), of the learned initial state u(0) and of plain
 bilinear interpolation of the gap-filled input, all on label-valid pixels. Writes results/v1_train/run_<timestamp>/.
 
+`--static label_mean anomaly` adds the training label climatology as static fine-grid channels of the vector field
+(decision 8, AGENTS.md): built from the training dates only (not the monitoring block), left-one-out on each training
+date, used in full on the monitoring block; saved as models/static.npz for inference.
+
 Usage (project root, devenv shell active):
     PYTHONPATH=smapsr python smapsr/experiments/train_v1.py --steps 2000
     PYTHONPATH=smapsr python smapsr/experiments/train_v1.py --steps 20 --batch-size 2 --crop 16 --width 8   # smoke
@@ -23,7 +27,8 @@ import numpy as np
 import pandas as pd
 
 from smapsr import evals
-from smapsr.data import DailyPairs
+from smapsr.baselines import Climatology
+from smapsr.data import STATIC_CHANNELS, DailyPairs
 from smapsr.losses import masked_daily_loss
 from smapsr.models import NeuralODEV1
 from smapsr.train import train_v1
@@ -61,6 +66,9 @@ def parse_args():
     p.add_argument("--eval-every", type=int, default=200)
     p.add_argument("--val-crops", type=int, default=64)
     p.add_argument("--print-every", type=int, default=50)
+    p.add_argument("--static", nargs="*", default=[], choices=list(STATIC_CHANNELS),
+                   help="static climatology channels for the vector field (a validity channel is added); none by default")
+    p.add_argument("--static-min-count", type=int, default=5, help="min training observations per pixel for the static climatology")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
 
@@ -100,23 +108,34 @@ def main():
     if val is not None:
         pd.Series([f"{d:%Y-%m-%d}" for d in val.dates], name="date").to_csv(run_dir / "inputs" / "val_dates.csv", index=False)
     print("train", train.summary(), "\nval", val.summary() if val else None, flush=True)
+    clim = None
+    if args.static:
+        clim = Climatology(train.fine[0].shape, args.factor, args.static_min_count)
+        for d, c, f in zip(train.dates, train.coarse, train.fine):
+            clim.add(c, f, date=d)
+        for ds in (train, val):
+            if ds is not None:
+                ds.set_static(clim, args.static)
+        clim.save(run_dir / "models" / "static.npz")
+        print(f"static climatology: {len(clim.contrib)} training dates, {int(clim.covered.sum())} covered pixels", flush=True)
+    n_static = train.static_channels
 
     strides = (args.factor,)
     hyper = dict(in_channels=2, strides=list(strides), width=args.width, depth=args.depth, groups=args.groups,
-                 n_freq=args.n_freq, n_steps=args.n_steps, kernel=args.kernel)
-    model = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, key=jr.PRNGKey(args.seed))
+                 n_freq=args.n_freq, n_steps=args.n_steps, kernel=args.kernel, static_channels=n_static, static=list(args.static))
+    model = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, n_static, key=jr.PRNGKey(args.seed))
     reference = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, key=jr.PRNGKey(0))  # untrained = bilinear
     n_params = sum(a.size for a in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
     eval_fn = None
     if val is not None:
-        vx, vy, vm, _ = val.fixed(args.val_crops, seed=1234)
-        vx, vy, vm = jnp.asarray(vx), jnp.asarray(vy), jnp.asarray(vm)
+        vx, vy, vm, _, vs = val.fixed(args.val_crops, seed=1234)
+        vx, vy, vm, vs = jnp.asarray(vx), jnp.asarray(vy), jnp.asarray(vm), jnp.asarray(vs)
         parent = np.repeat(np.repeat(np.asarray(vx[:, 1]), args.factor, axis=1), args.factor, axis=2) > 0   # label pixel with a valid coarse parent
 
         @jax.jit
-        def predict(m, x):
-            return jax.vmap(m, in_axes=(0, None))(x, args.scale_km)[:, 0]
+        def predict(m, x, s):
+            return jax.vmap(m, in_axes=(0, None, 0))(x, args.scale_km, s)[:, 0]
         bil = np.asarray(jax.jit(jax.vmap(reference.initial_state))(vx)[:, 0])
 
         def pooled(pred, mask):
@@ -125,7 +144,7 @@ def main():
             return evals.point_metrics(np.asarray(vy[:, 0])[mm], pred[mm])
 
         def eval_fn(model, step):
-            u1 = np.asarray(predict(model, vx))
+            u1 = np.asarray(predict(model, vx, vs))
             u0 = np.asarray(jax.jit(jax.vmap(model.initial_state))(vx)[:, 0])
             loss = float(masked_daily_loss(jnp.asarray(u1), vy[:, 0], vm, val.data_range, args.ssim_weight, args.min_valid_fraction))
             out = dict(val_loss=loss)
@@ -152,7 +171,10 @@ def main():
                             normalisation="mean/std of the valid coarse (clipped) pixels of the training dates, applied unchanged to validation",
                             clip=list(train.clip), labels="never gap-filled; per-date masks; zero-filled where invalid",
                             input_gaps="set to 0 (training mean in normalised units) with a validity channel",
-                            test_period="2016-2020 is never opened by this script"),
+                            test_period="2016-2020 is never opened by this script",
+                            static=dict(channels=list(args.static) + (["valid"] if args.static else []), min_count=args.static_min_count,
+                                        source="training label climatology (training dates only), left-one-out per training date; full on validation",
+                                        saved_as="models/static.npz (baselines.Climatology.load)") if args.static else None),
                   loss=f"masked_daily_loss: {1 - args.ssim_weight} * masked MSE + {args.ssim_weight} * (1 - masked SSIM), SSIM windows need >= {args.min_valid_fraction} valid fraction, normalised units",
                   optimiser=f"AdaBelief lr={args.lr}" + (f" with global-norm clipping {args.clip_norm}" if args.clip_norm else ""),
                   final=hist.iloc[-1].to_dict(), runtime_s=round(time.time() - t0, 1))

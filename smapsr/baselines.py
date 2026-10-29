@@ -52,20 +52,56 @@ class Climatology:
     the pixel's parent is valid:
         label_mean  C = mean(L)            (the day-independent label climatology)
         anomaly     A = mean(L - B_t)      (B_t = bilinear of that day's coarse field)
-    Pixels with fewer than `min_count` such days are undefined (NaN)."""
+    Pixels with fewer than `min_count` such days are undefined (NaN).
+    `add(..., date=d)` also keeps that day's contributions, so `fields` can leave the day out (training inputs)."""
 
     def __init__(self, shape, factor, min_count=5):
         self.factor, self.min_count = factor, min_count
         self.n = np.zeros(shape, dtype=np.int32)
         self.sum_l = np.zeros(shape, dtype=np.float64)
         self.sum_d = np.zeros(shape, dtype=np.float64)
+        self.contrib = {}
 
-    def add(self, coarse, fine):
+    def add(self, coarse, fine, date=None):
         b = bilinear(coarse, self.factor)
         ok = np.isfinite(fine) & np.isfinite(b)
         self.n += ok
         self.sum_l += np.where(ok, fine, 0.0)
         self.sum_d += np.where(ok, fine - b, 0.0)
+        if date is not None:
+            r, c = np.nonzero(ok)
+            self.contrib[date] = (r.astype(np.int32), c.astype(np.int32), fine[ok].astype(np.float64), (fine - b)[ok].astype(np.float64))
+
+    def fields(self, mean, std, rows=slice(None), cols=slice(None), leave_out=None):
+        """Static input channels on a window of the fine grid: [(C - mean) / std, A / std, valid] (3, h, w), float32.
+
+        C and A as above, 0 where undefined (valid = 0); mean/std are the model's normalisation (A is a difference,
+        so it is only scaled). `leave_out=date` first removes that day's contribution (leave-one-out climatology,
+        so a training label never reaches the model through its own input)."""
+        n, sl, sd = self.n[rows, cols].astype(np.float64), self.sum_l[rows, cols].copy(), self.sum_d[rows, cols].copy()
+        if leave_out is not None and leave_out in self.contrib:
+            r, c, l, d = self.contrib[leave_out]
+            r0, c0 = rows.start or 0, cols.start or 0
+            inside = (r >= r0) & (r < r0 + n.shape[0]) & (c >= c0) & (c < c0 + n.shape[1])
+            r, c = r[inside] - r0, c[inside] - c0
+            np.subtract.at(n, (r, c), 1)
+            np.subtract.at(sl, (r, c), l[inside])
+            np.subtract.at(sd, (r, c), d[inside])
+        ok = n >= self.min_count
+        with np.errstate(invalid="ignore", divide="ignore"):
+            C = np.where(ok, (sl / n - mean) / std, 0.0)
+            A = np.where(ok, sd / n / std, 0.0)
+        return np.stack([C, A, ok]).astype(np.float32)
+
+    def save(self, path):
+        np.savez_compressed(path, n=self.n, sum_l=self.sum_l, sum_d=self.sum_d, factor=self.factor, min_count=self.min_count)
+
+    @classmethod
+    def load(cls, path):
+        with np.load(path) as z:
+            c = cls(z["n"].shape, int(z["factor"]), int(z["min_count"]))
+            c.n, c.sum_l, c.sum_d = z["n"], z["sum_l"], z["sum_d"]
+        return c
 
     @property
     def covered(self):
