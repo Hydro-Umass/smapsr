@@ -49,7 +49,7 @@ def build_parser():
     p.add_argument("--block-days", type=int, default=30)
     p.add_argument("--n-boot", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--v1", nargs="*", default=[], help="train_v1 run directories (results/v1_train/run_*); each is evaluated as v1_<n>")
+    p.add_argument("--v1", nargs="*", default=[], help="train_v1 run directories (results/v1_train/run_*), or a checkpoint <run>/models/model_step<n>.eqx; each is evaluated as v1_<n>")
     p.add_argument("--v1-tile", type=int, default=32, help="V1 inference tile in coarse cells (= training crop; 0 = full grid, which GroupNorm penalises)")
     p.add_argument("--v1-halo", type=int, default=8, help="V1 inference halo in coarse cells around each tile")
     p.add_argument("--limit", type=int, default=0, help="debug: use only the first N dates of each period")
@@ -125,8 +125,9 @@ def load_v1_models(run_dirs, tile=32, halo=8, only=None):
     from smapsr.data import STATIC_CHANNELS
     out = {}
     for n, d in enumerate(run_dirs):
-        cfg = json.loads((Path(d) / "config.json").read_text())
-        model, mean, std = evals.load_v1(Path(d) / "models" / "model.eqx")
+        d, mfile = (Path(d).parent.parent, Path(d)) if Path(d).suffix == ".eqx" else (Path(d), Path(d) / "models" / "model.eqx")
+        cfg = json.loads((d / "config.json").read_text())
+        model, mean, std = evals.load_v1(mfile)
         scale, factor = float(cfg["args"]["scale_km"]), int(cfg["args"]["factor"])
         names = cfg["args"].get("static") or []
         fwd = jax.jit(lambda x, s, m=model: m(x, scale, s))

@@ -64,6 +64,8 @@ def parse_args():
     p.add_argument("--ssim-weight", type=float, default=0.5)
     p.add_argument("--min-valid-fraction", type=float, default=0.5)
     p.add_argument("--eval-every", type=int, default=200)
+    p.add_argument("--checkpoint-every", type=int, default=0,
+                   help="also save the model as models/model_step<n>.eqx at every evaluation step that is a multiple of this (0 = final model only)")
     p.add_argument("--val-crops", type=int, default=64)
     p.add_argument("--print-every", type=int, default=50)
     p.add_argument("--static", nargs="*", default=[], choices=list(STATIC_CHANNELS),
@@ -154,6 +156,8 @@ def main():
                     suffix = "" if sub == "all" else "_parentvalid"
                     out[f"val_rmse{name}{suffix}"] = r["RMSE"] * train.std      # m3/m3
                     out[f"val_R{name}{suffix}"] = r["R"]
+            if args.checkpoint_every and step % args.checkpoint_every == 0:
+                evals.save(run_dir / "models" / f"model_step{step}.eqx", dict(hyper, data_mean=train.mean, data_std=train.std), model)
             return out
 
     model, history = train_v1(model, train, scale_km=args.scale_km, steps=args.steps, batch_size=args.batch_size, lr=args.lr,
@@ -166,7 +170,7 @@ def main():
     config = dict(experiment="v1_train", script=str(Path(__file__).resolve().relative_to(repo.parent)), git=git_state(repo), args=vars(args),
                   jax=dict(version=jax.__version__, devices=[str(d) for d in jax.devices()]),
                   model=dict(class_="NeuralODEV1", hyperparameters=hyper, n_parameters=int(n_params), approx_nfe=6 * args.n_steps + 1,
-                             saved_as="models/model.eqx (evals.load_v1)"),
+                             saved_as="models/model.eqx (evals.load_v1)" + (f"; checkpoints models/model_step<n>.eqx every {args.checkpoint_every} steps" if args.checkpoint_every else "")),
                   data=dict(cache=str(Path(args.cache).resolve()), train=train.summary(), val=val.summary() if val else None,
                             normalisation="mean/std of the valid coarse (clipped) pixels of the training dates, applied unchanged to validation",
                             clip=list(train.clip), labels="never gap-filled; per-date masks; zero-filled where invalid",
