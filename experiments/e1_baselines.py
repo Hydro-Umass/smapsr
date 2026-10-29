@@ -88,18 +88,21 @@ def pooled(s):
     return dict(R=r, RMSE=np.sqrt(mse), uRMSE=np.sqrt(np.maximum(mse - bias**2, 0)), bias=bias)
 
 
-def tiled(fwd, x, tile, halo, factor, s):
+def tiled(fwd, x, tile, halo, factor, s, only=None):
     """Predict (H*f, W*f) from x (C, h, w) and static fine-grid channels s (S, H*f, W*f) with tiles of `tile` coarse
     cells plus a `halo` on each side (zero input, validity and static channels outside the domain). Matches the
-    training crop extent, which GroupNorm is sensitive to."""
+    training crop extent, which GroupNorm is sensitive to. `only`: set of tile origins (i, j) in coarse cells to
+    predict (others stay NaN); a tile's output depends only on the tile and its halo, so the values are unchanged."""
     import jax.numpy as jnp
     _, h, w = x.shape
-    out = np.zeros((h * factor, w * factor), dtype=np.float32)
+    out = np.full((h * factor, w * factor), np.nan, dtype=np.float32)
     pad = np.pad(x, ((0, 0), (halo, halo), (halo, halo)))
     hf = halo * factor
     spad = np.pad(s, ((0, 0), (hf, hf), (hf, hf)))
     for i in range(0, h, tile):
         for j in range(0, w, tile):
+            if only is not None and (i, j) not in only:
+                continue
             ti, tj = min(tile, h - i), min(tile, w - j)
             st = spad[:, i * factor:(i + ti + 2 * halo) * factor, j * factor:(j + tj + 2 * halo) * factor]
             y = np.asarray(fwd(jnp.asarray(pad[:, i:i + ti + 2 * halo, j:j + tj + 2 * halo]), jnp.asarray(st)))[0]
@@ -107,9 +110,15 @@ def tiled(fwd, x, tile, halo, factor, s):
     return out
 
 
-def load_v1_models(run_dirs, tile=32, halo=8):
+def tiles_covering(rows, cols, tile, factor):
+    """Origins (coarse cells) of the inference tiles that contain the given fine-grid cells."""
+    return {(int(r) // factor // tile * tile, int(c) // factor // tile * tile) for r, c in zip(rows, cols)}
+
+
+def load_v1_models(run_dirs, tile=32, halo=8, only=None):
     """{name: fn(coarse day in m3/m3, NaN gaps) -> fine field in m3/m3} for trained V1 runs (tiled inference unless tile=0).
-    Runs trained with static channels use their own saved training climatology (models/static.npz), in full."""
+    Runs trained with static channels use their own saved training climatology (models/static.npz), in full.
+    `only` (tiled inference only): tile origins to predict, NaN elsewhere (see `tiled`)."""
     import jax
     import jax.numpy as jnp
     from smapsr.baselines import Climatology
@@ -131,7 +140,7 @@ def load_v1_models(run_dirs, tile=32, halo=8):
             x = np.stack([np.where(v, (c - mean) / std, 0.0), v.astype(np.float32)]).astype(np.float32)
             s = s_full if s_full is not None else np.zeros((0, c.shape[0] * factor, c.shape[1] * factor), np.float32)
             if tile:
-                return tiled(fwd, x, tile, halo, factor, s) * std + mean
+                return tiled(fwd, x, tile, halo, factor, s, only) * std + mean
             return np.asarray(fwd(jnp.asarray(x), jnp.asarray(s))[0]) * std + mean
         out[f"v1_{n}"] = fn
     return out
@@ -192,6 +201,7 @@ def main():
     tm_p = np.zeros((M,) + covered.shape)
     tm_n = np.zeros(covered.shape, dtype=np.int32)
     used = np.zeros(D, dtype=bool)
+    cache = {}                                    # k -> (flat evaluation-pixel index, label, {method: prediction}) for pass 2
 
     def day(d):
         """(label, evaluation mask, {method: prediction}) for one test date, or None."""
@@ -213,6 +223,8 @@ def main():
             continue
         f, ev, preds = got
         used[k] = True
+        idx = np.flatnonzero(ev)
+        cache[k] = (idx, f.ravel()[idx], {name: preds[name].ravel()[idx] for name in methods})
         for m, name in enumerate(methods):
             p = preds[name]
             for si, sub in enumerate(SUBSETS):
@@ -230,20 +242,19 @@ def main():
         if (k + 1) % 100 == 0:
             print(f"  {k + 1}/{D} test dates", flush=True)
     # second pass: anomalies relative to each series' own test-period pixel mean (separates day-specific skill
-    # from pixel-level offsets; means are fixed from pass 1, not resampled in the bootstrap)
+    # from pixel-level offsets; means are fixed from pass 1, not resampled in the bootstrap). Uses the pass-1
+    # predictions on the evaluation pixels (cache) instead of predicting again: identical values, half the runtime.
     ok_px = covered & (tm_n >= a.min_count)
     o_bar = np.where(ok_px, tm_o / np.maximum(tm_n, 1), np.nan)
     anom2 = np.full((D, M, 6), np.nan)
-    for k, d in enumerate(test):
-        if not used[k]:
-            continue
-        f, ev, preds = day(d)
+    p_bar = [(tm_p[m] / np.maximum(tm_n, 1)).ravel() for m in range(M)]
+    ok_flat, o_flat = ok_px.ravel(), o_bar.ravel()
+    for k, (idx, f, preds) in cache.items():
         for m, name in enumerate(methods):
             p = preds[name]
-            sel = ev & ok_px & np.isfinite(p)
+            sel = ok_flat[idx] & np.isfinite(p)
             if sel.any():
-                p_bar = tm_p[m] / np.maximum(tm_n, 1)
-                anom2[k, m] = sums((f - o_bar)[sel].astype(np.float64), (p - p_bar)[sel].astype(np.float64))
+                anom2[k, m] = sums((f - o_flat[idx])[sel].astype(np.float64), (p - p_bar[m][idx])[sel].astype(np.float64))
     test_used = [d for d, u in zip(test, used) if u]
     val, anom, anom2, daily_r = val[used], anom[used], anom2[used], daily_r[used]
     print(f"{len(test_used)} test label-days with evaluation pixels; {time.time() - t0:.0f} s", flush=True)
