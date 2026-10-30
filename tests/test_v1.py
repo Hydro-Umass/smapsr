@@ -104,6 +104,48 @@ def test_save_load_roundtrip(tmp_path):
     assert float(jnp.abs(loaded(x, 3.0) - model(x, 3.0)).max()) == 0.0
 
 
+def _randomised_func(func, seed=7, scale=0.3):
+    """The vector field with every inexact parameter redrawn (breaks the zero initialisation)."""
+    leaves, tree = jax.tree_util.tree_flatten(eqx.filter(func, eqx.is_inexact_array))
+    keys = jr.split(jr.PRNGKey(seed), len(leaves))
+    rand = jax.tree_util.tree_unflatten(tree, [scale * jr.normal(k, a.shape) for k, a in zip(keys, leaves)])
+    return eqx.combine(rand, eqx.filter(func, lambda a: not eqx.is_inexact_array(a)))
+
+
+@pytest.mark.parametrize("norm,independent", [("pixel", True), ("none", True), ("group", False)])
+def test_vector_field_is_extent_independent_only_without_groupnorm(norm, independent):
+    # one evaluation of F on a field and on a window of it: away from the window edge (beyond the receptive field
+    # (depth + 1) * (kernel - 1) / 2 = 4 cells) the two agree iff the normalisation is pointwise
+    from smapsr.models import ConvFunc
+    f = _randomised_func(ConvFunc(8, 3, 4, cond_dim=10, kernel=3, norm=norm, key=jr.PRNGKey(0)))
+    u = jnp.asarray(np.random.default_rng(5).normal(size=(1, 40, 40)), jnp.float32)
+    args = dict(scale_emb=scale_embedding(3.0, 4))
+    full, part = f(0.5, u, args), f(0.5, u[:, 10:30, 10:30], args)
+    diff = float(jnp.abs(full[:, 14:26, 14:26] - part[:, 4:16, 4:16]).max())
+    assert (diff < 1e-5) == independent
+
+
+def test_pixel_norm_normalises_each_pixel_over_channels():
+    from smapsr.models import PixelNorm
+    h = jnp.asarray(np.random.default_rng(6).normal(2.0, 3.0, size=(8, 5, 6)), jnp.float32)
+    out = PixelNorm(8)(h)
+    np.testing.assert_allclose(np.asarray(out.mean(0)), 0.0, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(out.std(0)), 1.0, atol=1e-3)
+
+
+def test_norm_option_keeps_bilinear_start_and_roundtrips(tmp_path):
+    hyper = dict(in_channels=2, strides=[3], width=8, depth=2, groups=4, n_freq=4, n_steps=2, kernel=3, norm="pixel",
+                 data_mean=0.3, data_std=0.1)
+    model, _, _ = evals.make_v1(key=jr.PRNGKey(0), **hyper)
+    x = jnp.asarray(np.random.default_rng(8).normal(size=(2, 9, 9)), jnp.float32)
+    assert float(jnp.abs(model(x, 3.0) - model.initial_state(x)).max()) == 0.0
+    model = eqx.tree_at(lambda m: m.func, model, _randomised_func(model.func))
+    evals.save(tmp_path / "m.eqx", hyper, model)
+    back, _, _ = evals.load_v1(tmp_path / "m.eqx")
+    assert type(back.func.norms[0]).__name__ == "PixelNorm"
+    assert float(jnp.abs(back(x, 3.0) - model(x, 3.0)).max()) == 0.0
+
+
 # --- loss ----------------------------------------------------------------------------------------
 
 def make_fields(seed=0, shape=(3, 40, 40), keep=0.4):

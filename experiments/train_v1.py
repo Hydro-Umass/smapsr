@@ -53,7 +53,10 @@ def parse_args():
     p.add_argument("--origin-stride", type=int, default=2)
     p.add_argument("--width", type=int, default=32)
     p.add_argument("--depth", type=int, default=4)
-    p.add_argument("--groups", type=int, default=8)
+    p.add_argument("--groups", type=int, default=8, help="GroupNorm groups (--norm group only)")
+    p.add_argument("--norm", default="group", choices=["group", "pixel", "none"],
+                   help="vector-field normalisation: group = GroupNorm (depends on the spatial extent, needs tiled inference), "
+                        "pixel = per-pixel channel norm (extent-independent), none")
     p.add_argument("--kernel", type=int, default=3, help="conv kernel size of the vector field (receptive field per evaluation = (depth + 1) * (kernel - 1) / 2 fine cells)")
     p.add_argument("--n-freq", type=int, default=4)
     p.add_argument("--n-steps", type=int, default=10, help="solver steps over t in [0, 1] (about 6 n + 1 function evaluations)")
@@ -124,8 +127,8 @@ def main():
 
     strides = (args.factor,)
     hyper = dict(in_channels=2, strides=list(strides), width=args.width, depth=args.depth, groups=args.groups,
-                 n_freq=args.n_freq, n_steps=args.n_steps, kernel=args.kernel, static_channels=n_static, static=list(args.static))
-    model = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, n_static, key=jr.PRNGKey(args.seed))
+                 n_freq=args.n_freq, n_steps=args.n_steps, kernel=args.kernel, static_channels=n_static, static=list(args.static), norm=args.norm)
+    model = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, n_static, args.norm, key=jr.PRNGKey(args.seed))
     reference = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, key=jr.PRNGKey(0))  # untrained = bilinear
     n_params = sum(a.size for a in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 

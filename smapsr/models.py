@@ -102,8 +102,37 @@ def scale_embedding(scale_km, n_freq):
     return jnp.concatenate([x[None], jnp.sin(f * x), jnp.cos(f * x)])
 
 
+class PixelNorm(eqx.Module):
+    """Normalise the channels of every pixel separately (LayerNorm over channels, as in ConvNeXt), then a learned
+    per-channel scale and offset. Pointwise, so unlike GroupNorm the output at a pixel does not depend on the spatial
+    extent it is applied to: training crops, inference tiles and the full grid see the same operator."""
+    weight: jax.Array
+    bias: jax.Array
+    eps: float = eqx.field(static=True)
+
+    def __init__(self, channels, eps=1e-5):
+        self.weight, self.bias, self.eps = jnp.ones(channels), jnp.zeros(channels), eps
+
+    def __call__(self, h):
+        mu = h.mean(0, keepdims=True)
+        var = ((h - mu) ** 2).mean(0, keepdims=True)
+        return (h - mu) / jnp.sqrt(var + self.eps) * self.weight[:, None, None] + self.bias[:, None, None]
+
+
+def make_norm(norm, groups, width):
+    """'group' (GroupNorm over channel groups and the whole extent), 'pixel' (PixelNorm) or 'none'."""
+    if norm == "group":
+        return eqx.nn.GroupNorm(groups, width)
+    if norm == "pixel":
+        return PixelNorm(width)
+    if norm == "none":
+        return eqx.nn.Identity()
+    raise ValueError(f"unknown norm {norm!r}")
+
+
 class ConvFunc(eqx.Module):
-    """F_theta: small conv stack over a (1, H, W) state with GroupNorm, SiLU and FiLM scale/time conditioning.
+    """F_theta: small conv stack over a (1, H, W) state with normalisation (`norm`, see make_norm), SiLU and FiLM
+    scale/time conditioning.
 
     Parameters depend on width/depth (and the number of static channels) only, not on H, W. The last conv and every
     FiLM layer start at zero, so the initial vector field is identically zero and u(1) = u(0). Zero padding at the
@@ -114,11 +143,11 @@ class ConvFunc(eqx.Module):
     films: tuple
     out: eqx.nn.Conv2d
 
-    def __init__(self, width, depth, groups, cond_dim, kernel=3, static_channels=0, *, key):
+    def __init__(self, width, depth, groups, cond_dim, kernel=3, static_channels=0, norm="group", *, key):
         keys = jr.split(key, 2 * depth + 1)
         cins = [1 + static_channels] + [width] * (depth - 1)
         self.convs = tuple(eqx.nn.Conv2d(c, width, kernel, padding="SAME", key=keys[i]) for i, c in enumerate(cins))
-        self.norms = tuple(eqx.nn.GroupNorm(groups, width) for _ in range(depth))
+        self.norms = tuple(make_norm(norm, groups, width) for _ in range(depth))
         films = []
         for i in range(depth):
             lin = eqx.nn.Linear(cond_dim, 2 * width, key=keys[depth + i])
@@ -150,10 +179,10 @@ class NeuralODEV1(eqx.Module):
     n_freq: int = eqx.field(static=True)
 
     def __init__(self, in_channels=2, strides=(3,), width=32, depth=4, groups=8, n_freq=4, n_steps=10, kernel=3,
-                 static_channels=0, *, key):
+                 static_channels=0, norm="group", *, key):
         k1, k2 = jr.split(key)
         self.upsampler = Upsampler(in_channels, strides, key=k1)
-        self.func = ConvFunc(width, depth, groups, cond_dim=2 * n_freq + 2, kernel=kernel, static_channels=static_channels, key=k2)
+        self.func = ConvFunc(width, depth, groups, cond_dim=2 * n_freq + 2, kernel=kernel, static_channels=static_channels, norm=norm, key=k2)
         self.n_steps = n_steps
         self.n_freq = n_freq
 
