@@ -58,6 +58,8 @@ def parse_args():
                    help="vector-field normalisation: group = GroupNorm (depends on the spatial extent, needs tiled inference), "
                         "pixel = per-pixel channel norm (extent-independent), none")
     p.add_argument("--kernel", type=int, default=3, help="conv kernel size of the vector field (receptive field per evaluation = (depth + 1) * (kernel - 1) / 2 fine cells)")
+    p.add_argument("--arch", default="node", choices=["node", "edsr"], help="edsr = EDSR-lite baseline (E1): --depth residual blocks, --width, --kernel; --norm, --n-steps, --solver unused")
+    p.add_argument("--solver", default="tsit5", choices=["tsit5", "euler"], help="euler with --n-steps 61 = same-f discrete ResNet at the NFE of Tsit5 with 10 steps (E1)")
     p.add_argument("--n-freq", type=int, default=4)
     p.add_argument("--n-steps", type=int, default=10, help="solver steps over t in [0, 1] (about 6 n + 1 function evaluations)")
     p.add_argument("--steps", type=int, default=2000, help="optimiser updates (batches, not epochs)")
@@ -127,8 +129,8 @@ def main():
 
     strides = (args.factor,)
     hyper = dict(in_channels=2, strides=list(strides), width=args.width, depth=args.depth, groups=args.groups,
-                 n_freq=args.n_freq, n_steps=args.n_steps, kernel=args.kernel, static_channels=n_static, static=list(args.static), norm=args.norm)
-    model = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, n_static, args.norm, key=jr.PRNGKey(args.seed))
+                 n_freq=args.n_freq, n_steps=args.n_steps, kernel=args.kernel, static_channels=n_static, static=list(args.static), norm=args.norm, solver=args.solver, arch=args.arch)
+    model, _, _ = evals.make_v1(key=jr.PRNGKey(args.seed), data_mean=train.mean, data_std=train.std, **hyper)
     reference = NeuralODEV1(2, strides, args.width, args.depth, args.groups, args.n_freq, args.n_steps, args.kernel, key=jr.PRNGKey(0))  # untrained = bilinear
     n_params = sum(a.size for a in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
@@ -172,7 +174,8 @@ def main():
 
     config = dict(experiment="v1_train", script=str(Path(__file__).resolve().relative_to(repo.parent)), git=git_state(repo), args=vars(args),
                   jax=dict(version=jax.__version__, devices=[str(d) for d in jax.devices()]),
-                  model=dict(class_="NeuralODEV1", hyperparameters=hyper, n_parameters=int(n_params), approx_nfe=6 * args.n_steps + 1,
+                  model=dict(class_=type(model).__name__, hyperparameters=hyper, n_parameters=int(n_params),
+                             approx_nfe=1 if args.arch == "edsr" else (args.n_steps if args.solver == "euler" else 6 * args.n_steps + 1),
                              saved_as="models/model.eqx (evals.load_v1)" + (f"; checkpoints models/model_step<n>.eqx every {args.checkpoint_every} steps" if args.checkpoint_every else "")),
                   data=dict(cache=str(Path(args.cache).resolve()), train=train.summary(), val=val.summary() if val else None,
                             normalisation="mean/std of the valid coarse (clipped) pixels of the training dates, applied unchanged to validation",

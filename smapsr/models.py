@@ -172,19 +172,22 @@ class NeuralODEV1(eqx.Module):
     __call__(x, scale_km, static=None): x is (C_in, h, w) on the coarse grid, scale_km the target pixel size (only
     enters through the Fourier embedding; one scale per run in stage 1), static the (static_channels, H, W) fine-grid
     fields seen by F_theta (required iff static_channels > 0). Returns the (1, H, W) fine field, H = h * prod(strides).
-    Solver: Tsitouras 5/4, constant step 1/n_steps (about 6 * n_steps + 1 function evaluations)."""
+    Solver: Tsitouras 5/4, constant step 1/n_steps (about 6 * n_steps + 1 function evaluations), or solver="euler":
+    explicit Euler with n_steps evaluations, i.e. the same-f discrete ResNet u_{k+1} = u_k + f(u_k, t_k) / n_steps."""
     upsampler: Upsampler
     func: ConvFunc
     n_steps: int = eqx.field(static=True)
     n_freq: int = eqx.field(static=True)
+    solver: str = eqx.field(static=True)
 
     def __init__(self, in_channels=2, strides=(3,), width=32, depth=4, groups=8, n_freq=4, n_steps=10, kernel=3,
-                 static_channels=0, norm="group", *, key):
+                 static_channels=0, norm="group", solver="tsit5", *, key):
         k1, k2 = jr.split(key)
         self.upsampler = Upsampler(in_channels, strides, key=k1)
         self.func = ConvFunc(width, depth, groups, cond_dim=2 * n_freq + 2, kernel=kernel, static_channels=static_channels, norm=norm, key=k2)
         self.n_steps = n_steps
         self.n_freq = n_freq
+        self.solver = solver
 
     def initial_state(self, x):
         return self.upsampler(x)
@@ -195,7 +198,61 @@ class NeuralODEV1(eqx.Module):
         if static is not None and static.shape[0]:
             args["static"] = static
         sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(self.func), diffrax.Tsit5(), t0=0.0, t1=1.0, dt0=1.0 / self.n_steps, y0=u0, args=args,
+            diffrax.ODETerm(self.func), dict(tsit5=diffrax.Tsit5(), euler=diffrax.Euler())[self.solver], t0=0.0, t1=1.0, dt0=1.0 / self.n_steps, y0=u0, args=args,
             stepsize_controller=diffrax.ConstantStepSize(), saveat=diffrax.SaveAt(t1=True),
         )
         return sol.ys[0]
+
+
+class ResBlock(eqx.Module):
+    """EDSR residual block: conv, ReLU, conv, plus the input (no normalisation)."""
+    a: eqx.nn.Conv2d
+    b: eqx.nn.Conv2d
+
+    def __init__(self, width, kernel, *, key):
+        k1, k2 = jr.split(key)
+        self.a = eqx.nn.Conv2d(width, width, kernel, padding="SAME", key=k1)
+        self.b = eqx.nn.Conv2d(width, width, kernel, padding="SAME", key=k2)
+
+    def __call__(self, h):
+        return h + self.b(jnn.relu(self.a(h)))
+
+
+class EDSRLite(eqx.Module):
+    """E1 baseline: a small EDSR [features on the coarse grid, pixel-shuffle upsampling, no normalisation] on top of the
+    same bilinear start as V1 (the tail starts at zero, so an untrained model = bilinear). Fine-grid static channels are
+    pixel-unshuffled onto the coarse grid and join the input. Same call as NeuralODEV1; scale_km is unused, because the
+    architecture is tied to one scale factor (that is the point of comparing it with V1)."""
+    upsampler: Upsampler
+    head: eqx.nn.Conv2d
+    blocks: tuple
+    body: eqx.nn.Conv2d
+    tail: eqx.nn.Conv2d
+    factor: int = eqx.field(static=True)
+
+    def __init__(self, in_channels=2, strides=(3,), width=32, blocks=8, kernel=3, static_channels=0, *, key):
+        self.factor = int(np.prod(strides))
+        keys = jr.split(key, blocks + 4)
+        self.upsampler = Upsampler(in_channels, strides, key=keys[0])
+        self.head = eqx.nn.Conv2d(in_channels + static_channels * self.factor ** 2, width, kernel, padding="SAME", key=keys[1])
+        self.blocks = tuple(ResBlock(width, kernel, key=k) for k in keys[4:])
+        self.body = eqx.nn.Conv2d(width, width, kernel, padding="SAME", key=keys[2])
+        tail = eqx.nn.Conv2d(width, self.factor ** 2, kernel, padding="SAME", key=keys[3])
+        self.tail = eqx.tree_at(lambda l: (l.weight, l.bias), tail, (jnp.zeros_like(tail.weight), jnp.zeros_like(tail.bias)))
+
+    def initial_state(self, x):
+        return self.upsampler(x)
+
+    def __call__(self, x, scale_km, static=None):
+        f = self.factor
+        _, h, w = x.shape
+        z = x
+        if static is not None and static.shape[0]:
+            s = static.reshape(static.shape[0], h, f, w, f).transpose(0, 2, 4, 1, 3).reshape(-1, h, w)     # pixel unshuffle
+            z = jnp.concatenate([x, s])
+        z = self.head(z)
+        y = z
+        for block in self.blocks:
+            y = block(y)
+        y = self.tail(self.body(y) + z)
+        return self.initial_state(x) + y.reshape(f, f, h, w).transpose(2, 0, 3, 1).reshape(1, h * f, w * f)  # pixel shuffle

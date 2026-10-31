@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
 from smapsr.train import prepare_data
-from smapsr.models import NeuralODE, NeuralODEV1
+from smapsr.models import EDSRLite, NeuralODE, NeuralODEV1
 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 from tqdm import tqdm
 
@@ -143,10 +143,12 @@ def load(filename, mask):
         model, dmean, dstd = make(mask=mask, key=jr.PRNGKey(0), **hyperparams)
         return eqx.tree_deserialise_leaves(f, model), dmean, dstd
 
-def make_v1(*, key, in_channels, strides, width, depth, groups, n_freq, n_steps, data_mean, data_std, kernel=3, static_channels=0, static=None, norm="group"):
+def make_v1(*, key, in_channels, strides, width, depth, groups, n_freq, n_steps, data_mean, data_std, kernel=3, static_channels=0, static=None, norm="group", solver="tsit5", arch="node"):
     """V1 counterpart of `make`: no mask or geometry, the arguments are the hyperparameters saved with the model.
     `static` names the static fine-grid channels (their fields are saved next to the model, see train_v1.py)."""
-    model = NeuralODEV1(in_channels, tuple(strides), width, depth, groups, n_freq, n_steps, kernel, static_channels, norm, key=key)
+    if arch == "edsr":
+        return EDSRLite(in_channels, tuple(strides), width, depth, kernel, static_channels, key=key), data_mean, data_std
+    model = NeuralODEV1(in_channels, tuple(strides), width, depth, groups, n_freq, n_steps, kernel, static_channels, norm, solver, key=key)
     return model, data_mean, data_std
 
 def load_v1(filename):

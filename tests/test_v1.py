@@ -146,6 +146,64 @@ def test_norm_option_keeps_bilinear_start_and_roundtrips(tmp_path):
     assert float(jnp.abs(back(x, 3.0) - model(x, 3.0)).max()) == 0.0
 
 
+def test_euler_is_the_same_f_with_another_integrator():
+    tsit = NeuralODEV1(2, (3,), width=8, depth=2, groups=4, n_steps=10, norm="pixel", key=jr.PRNGKey(0))
+    euler = NeuralODEV1(2, (3,), width=8, depth=2, groups=4, n_steps=61, norm="pixel", solver="euler", key=jr.PRNGKey(0))
+    assert n_params(tsit) == n_params(euler)
+    x = jnp.asarray(np.random.default_rng(9).normal(size=(2, 10, 10)), jnp.float32)
+    assert float(jnp.abs(euler(x, 3.0) - euler.initial_state(x)).max()) == 0.0    # still starts at bilinear
+    f = _randomised_func(tsit.func, scale=0.1)
+    tsit, euler = (eqx.tree_at(lambda m: m.func, m, f) for m in (tsit, euler))
+    moved = float(jnp.abs(tsit(x, 3.0) - tsit.initial_state(x)).max())
+    assert moved > 1e-3
+    assert float(jnp.abs(euler(x, 3.0) - tsit(x, 3.0)).max()) < 0.2 * moved       # same ODE, first-order error
+
+
+def test_edsr_starts_at_bilinear_matches_v1_size_and_uses_static():
+    from smapsr.models import EDSRLite
+    v1 = NeuralODEV1(2, (3,), 32, 4, 8, 4, 10, 7, 3, "pixel", key=jr.PRNGKey(0))
+    m = EDSRLite(2, (3,), width=32, blocks=8, kernel=3, static_channels=3, key=jr.PRNGKey(0))
+    assert abs(n_params(m) - n_params(v1)) / n_params(v1) < 0.05
+    rng = np.random.default_rng(10)
+    x = jnp.asarray(rng.normal(size=(2, 12, 14)), jnp.float32)
+    s = jnp.asarray(rng.normal(size=(3, 36, 42)), jnp.float32)
+    assert m(x, 3.0, s).shape == (1, 36, 42)
+    assert float(jnp.abs(m(x, 3.0, s) - m.initial_state(x)).max()) == 0.0
+    tail = eqx.tree_at(lambda l: l.weight, m.tail, 0.1 * jr.normal(jr.PRNGKey(1), m.tail.weight.shape))
+    m = eqx.tree_at(lambda q: q.tail, m, tail)
+    base = m(x, 3.0, s)
+    assert float(jnp.abs(base - m.initial_state(x)).max()) > 1e-4
+    # a static pixel reaches the output through its own coarse cell (pixel unshuffle keeps the block together)
+    s2 = s.at[0, 4, 7].add(5.0)                                                   # fine (4, 7) -> coarse (1, 2)
+    d = np.asarray(jnp.abs(m(x, 3.0, s2) - base))[0]
+    assert d[3:6, 6:9].max() > 1e-4
+
+
+def test_edsr_pixel_shuffle_places_each_channel_at_its_block_position():
+    from smapsr.models import EDSRLite
+    m = EDSRLite(2, (3,), width=4, blocks=1, kernel=1, key=jr.PRNGKey(0))
+    # tail -> channel 4 only (the block centre): the output differs from the start only at block centres
+    w = np.zeros(m.tail.weight.shape, np.float32)
+    w[4] = 1.0
+    m = eqx.tree_at(lambda q: q.tail.weight, m, jnp.asarray(w))
+    x = jnp.asarray(np.random.default_rng(11).normal(size=(2, 3, 3)), jnp.float32)
+    d = np.asarray(jnp.abs(m(x, 3.0) - m.initial_state(x)))[0]
+    centre = np.zeros(d.shape, bool)
+    centre[1::3, 1::3] = True
+    assert d[centre].min() > 0 and d[~centre].max() == 0
+
+
+def test_baselines_roundtrip_through_make_v1(tmp_path):
+    common = dict(in_channels=2, strides=[3], width=8, groups=4, n_freq=4, kernel=3, data_mean=0.3, data_std=0.1)
+    x = jnp.asarray(np.random.default_rng(12).normal(size=(2, 9, 9)), jnp.float32)
+    for name, hyper in (("edsr", dict(depth=2, n_steps=1, arch="edsr")), ("euler", dict(depth=2, n_steps=5, solver="euler", norm="pixel"))):
+        model, _, _ = evals.make_v1(key=jr.PRNGKey(0), **common, **hyper)
+        evals.save(tmp_path / f"{name}.eqx", dict(common, **hyper), model)
+        back, _, _ = evals.load_v1(tmp_path / f"{name}.eqx")
+        assert type(back) is type(model)
+        assert float(jnp.abs(back(x, 3.0) - model(x, 3.0)).max()) == 0.0
+
+
 # --- loss ----------------------------------------------------------------------------------------
 
 def make_fields(seed=0, shape=(3, 40, 40), keep=0.4):
