@@ -221,6 +221,9 @@ def main():
             for m, name in enumerate(methods):
                 res[f"{name}|{kind}"] = r[m]
                 res[f"{name}-clim_null|{kind}"] = r[m] - r[null]
+            for pair in a.pairs:
+                x, y_ = pair.split(":")
+                res[f"{x}-{y_}|{kind}"] = r[methods.index(x)] - r[methods.index(y_)]
         return res
 
     point = stat(np.arange(D))
