@@ -1,8 +1,8 @@
 """Download + regrid SMAP products onto the project lat/lon grids, keeping quality flags.
 
 Successor to smap_data.ipynb (which produced the current data/ files but dropped every
-variable except soil moisture). Same search box, same HDF5 groups, same grids
-(np.arange(164.7, 179.6, step) x np.arange(-32.8, -47.8, -step)), same nearest-neighbour
+variable except soil moisture). For --region nz (default): same search box, same HDF5 groups, same
+grids (np.arange(164.7, 179.6, step) x np.arange(-32.8, -47.8, -step)), same nearest-neighbour
 regridding (radius of influence = resolution, epsilon 0.5) and the same `sm <= 0 -> NaN`
 rule — so `soil_moisture` should match the existing files — plus, from the *same*
 nearest swath cell:
@@ -10,6 +10,15 @@ nearest swath cell:
   retrieval_qual_flag   (integer bit flags, regridded without decoding)
   surface_flag          (if present in the granule)
   tb_time_seconds       (L3 only, if present: per-pixel overpass time)
+
+Other regions use the same grid expression on their own box, so their grids nest by shared origin
+and integer strides as the NZ ones do. Outputs of other regions or periods go to their own --out-root
+(never data_qc: its folders are globbed downstream, and the grids of two regions must not mix).
+
+SPL2SMA (radar-only, 3 km, 2015-04-13 to 2015-07-07) is an independent reference, not a training label:
+descending (6 a.m.) half orbits only, 1-D arrays, soil_moisture from the time-series algorithm, valid
+range 0.02-0.5, flag fill 65534 (user guide V003, Tables A3, A6, A8). Resolution degrades across track
+towards nadir, hence distance_from_nadir.
 
 Bit meanings are NOT decoded here — check them in the product user guides before
 filtering (bit 0 is the "retrieval recommended" bit in the SMAP L2/L3 products: 0 =
@@ -25,8 +34,11 @@ Usage:
     python smap_download.py --inspect
     python smap_download.py --products SPL3SMP_E SPL3SMP SPL2SMAP_S --workers 8
     python smap_download.py --products SPL2SMAP_S --start 2016-01-01 --end 2016-12-31
+    python smap_download.py --inspect --region murrumbidgee
+    python smap_download.py --region murrumbidgee --products SPL3SMP_E SPL3SMP SPL2SMAP_S SPL2SMA --start 2015-03-31 --chunk W
+    python smap_download.py --out-root data_regions/nz_radar --products SPL3SMP_E SPL3SMP SPL2SMAP_S SPL2SMA --start 2015-04-13 --end 2015-07-07
 
-Output: <out-root>/{smap9km,smap36km,smap3km,smap1km}/<granule>.nc (one file per granule;
+Output: <out-root>/{smap9km,smap36km,smap3km,smap1km,smapA3km}/<granule>.nc (one file per granule;
 existing outputs are skipped, so an interrupted run can simply be restarted) and
 <out-root>/download_log_<product>.csv (status per granule).
 """
@@ -44,7 +56,8 @@ import pandas as pd
 import xarray as xr
 from pyresample import geometry, kd_tree
 
-BBOX = (164.7, -47.8, 179.6, -32.8)       # lon_min, lat_min, lon_max, lat_max (as in smap_data.ipynb)
+REGIONS = {"nz": (164.7, -47.8, 179.6, -32.8),             # lon_min, lat_min, lon_max, lat_max (as in smap_data.ipynb)
+           "murrumbidgee": (144.0, -36.0, 148.0, -33.5)}   # SMAPEx-4/5, OzNet
 MARGIN_DEG = 1.0                          # swath cells kept around the box before the kd-tree (> any radius)
 DATE_RE = re.compile(r"_(\d{8})(?:T\d{6})?_")   # first date token: L3 `_YYYYMMDD_`, L2 SP SMAP time `_YYYYMMDDThhmmss_`
 
@@ -60,16 +73,21 @@ PRODUCTS = {
                         sm=f"soil_moisture_{r}km", lat=f"latitude_{r}km", lon=f"longitude_{r}km",
                         flag=f"retrieval_qual_flag_{r}km", optional=[f"surface_flag_{r}km"])
                    for r in (3, 1)],
+    "SPL2SMA": [dict(out="smapA3km", step=0.03, roi=3000, group="Soil_Moisture_Retrieval_Data",
+                     sm="soil_moisture", lat="latitude", lon="longitude", flag="retrieval_qual_flag",
+                     optional=["surface_flag", "distance_from_nadir"])],
 }
+DEFAULT_PRODUCTS = ["SPL3SMP_E", "SPL3SMP", "SPL2SMAP_S"]
+INSPECT_WINDOW = {"SPL2SMA": ("2015-05-01", "2015-05-10")}      # the radar failed on 2015-07-07
 
 
-def target_grid(step):
-    """Exactly the grid expression used by smap_data.ipynb."""
-    lon, lat = np.meshgrid(np.arange(164.7, 179.6, step), np.arange(-32.8, -47.8, -step))
+def target_grid(step, bbox):
+    """The grid expression of smap_data.ipynb, on the box of the region."""
+    lon, lat = np.meshgrid(np.arange(bbox[0], bbox[2], step), np.arange(bbox[3], bbox[1], -step))
     return lon, lat
 
 
-def regrid(lats, lons, fields, step, roi):
+def regrid(lats, lons, fields, step, roi, bbox):
     """Nearest-neighbour regrid of several swath fields using ONE neighbour lookup.
 
     All fields are sampled from the same swath cell, so flags line up with soil moisture.
@@ -78,12 +96,12 @@ def regrid(lats, lons, fields, step, roi):
     lats = np.asarray(lats, dtype=np.float64)
     lons = np.asarray(lons, dtype=np.float64)
     keep = ((lats != -9999) & (lons != -9999) & np.isfinite(lats) & np.isfinite(lons)
-            & (lats >= BBOX[1] - MARGIN_DEG) & (lats <= BBOX[3] + MARGIN_DEG)
-            & (lons >= BBOX[0] - MARGIN_DEG) & (lons <= BBOX[2] + MARGIN_DEG))
+            & (lats >= bbox[1] - MARGIN_DEG) & (lats <= bbox[3] + MARGIN_DEG)
+            & (lons >= bbox[0] - MARGIN_DEG) & (lons <= bbox[2] + MARGIN_DEG))
     if not keep.any():
         return None
     swath = geometry.SwathDefinition(lons=lons[keep], lats=lats[keep])
-    glon, glat = target_grid(step)
+    glon, glat = target_grid(step, bbox)
     grid = geometry.GridDefinition(lons=glon, lats=glat)
     vii, voi, idx, _ = kd_tree.get_neighbour_info(swath, grid, roi, neighbours=1, epsilon=0.5)
     out = {}
@@ -98,7 +116,7 @@ def int_fill(dtype):
     return np.iinfo(dtype).max if dtype.kind in "ui" else np.nan
 
 
-def process_layer(h5, layer, granule_name, short_name):
+def process_layer(h5, layer, granule_name, short_name, bbox):
     """Read one group of an open granule and return the regridded xr.Dataset (or None)."""
     g = h5[layer["group"]]
     missing = [k for k in ("sm", "lat", "lon", "flag") if layer[k] not in g]
@@ -113,7 +131,7 @@ def process_layer(h5, layer, granule_name, short_name):
     for v in present:
         a = g[v][:]
         fields[v] = (a, int_fill(a.dtype))
-    res = regrid(g[layer["lat"]][:], g[layer["lon"]][:], fields, layer["step"], layer["roi"])
+    res = regrid(g[layer["lat"]][:], g[layer["lon"]][:], fields, layer["step"], layer["roi"], bbox)
     if res is None:
         return None
     lat, lon, out = res
@@ -131,7 +149,7 @@ def process_layer(h5, layer, granule_name, short_name):
         data[name] = (("lat", "lon"), arr, attrs)
     return xr.Dataset(data, coords=dict(lat=lat, lon=lon),
                       attrs=dict(granule=granule_name, short_name=short_name, group=layer["group"],
-                                 grid_step_deg=layer["step"], radius_of_influence_m=layer["roi"],
+                                 bbox=list(bbox), grid_step_deg=layer["step"], radius_of_influence_m=layer["roi"],
                                  regrid="pyresample nearest, epsilon=0.5, one neighbour lookup for all fields",
                                  optional_missing=",".join(sorted(set(layer["optional"]) - set(present))),
                                  generator="smapsr/scripts/smap_download.py"))
@@ -143,14 +161,14 @@ def granule_h5_link(granule):
     return links[0]
 
 
-def run_chunk(short_name, start, end, version, out_root, overwrite):
+def run_chunk(short_name, start, end, version, out_root, overwrite, bbox):
     """Search + process one date chunk (runs in a worker process). Returns log rows."""
     import earthaccess
     earthaccess.login(strategy="environment" if os.environ.get("EARTHDATA_USERNAME") else "netrc")
     # Query one extra day, then keep granules whose filename date lies in [start, end]: chunks
     # neither miss boundary days nor process the same granule twice.
     q_end = str((pd.Timestamp(end) + pd.Timedelta(days=1)).date())
-    kw = dict(short_name=short_name, bounding_box=BBOX, temporal=(start, q_end), cloud_hosted=True)
+    kw = dict(short_name=short_name, bounding_box=bbox, temporal=(start, q_end), cloud_hosted=True)
     if version:
         kw["version"] = version
     granules = earthaccess.search_data(**kw)
@@ -173,7 +191,7 @@ def run_chunk(short_name, start, end, version, out_root, overwrite):
         try:
             with h5py.File(fh, "r") as h5:
                 for layer, out in zip(layers, outs):
-                    ds = process_layer(h5, layer, name.replace(".nc", ".h5"), short_name)
+                    ds = process_layer(h5, layer, name.replace(".nc", ".h5"), short_name, bbox)
                     if ds is None:
                         rows.append(dict(granule=name, layer=layer["out"], status="no_overlap"))
                         continue
@@ -189,16 +207,20 @@ def run_chunk(short_name, start, end, version, out_root, overwrite):
     return rows
 
 
-def inspect(version):
+def inspect(version, bbox):
     """Print the HDF5 tree of the first granule of each product."""
     import earthaccess
     earthaccess.login()
     for short_name, layers in PRODUCTS.items():
-        kw = dict(short_name=short_name, bounding_box=BBOX, temporal=("2017-01-01", "2017-01-10"), cloud_hosted=True)
+        window = INSPECT_WINDOW.get(short_name, ("2017-01-01", "2017-01-10"))
+        kw = dict(short_name=short_name, bounding_box=bbox, temporal=window, cloud_hosted=True)
         if version:
             kw["version"] = version
         gr = earthaccess.search_data(**kw)
-        print(f"\n=== {short_name}: {len(gr)} granules in 2017-01-01..10; first: {granule_h5_link(gr[0])}")
+        if not gr:
+            print(f"\n=== {short_name}: no granules in {window[0]}..{window[1]}")
+            continue
+        print(f"\n=== {short_name}: {len(gr)} granules in {window[0]}..{window[1]}; first: {granule_h5_link(gr[0])}")
         with h5py.File(earthaccess.open(gr[:1])[0], "r") as h5:
             for layer in layers:
                 g = h5[layer["group"]]
@@ -215,12 +237,13 @@ def inspect(version):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--products", nargs="+", default=list(PRODUCTS), choices=list(PRODUCTS))
+    ap.add_argument("--products", nargs="+", default=DEFAULT_PRODUCTS, choices=list(PRODUCTS))
+    ap.add_argument("--region", default="nz", choices=list(REGIONS))
     ap.add_argument("--start", default="2016-01-01")
     ap.add_argument("--end", default="2024-12-31")
     ap.add_argument("--version", default=None,
                     help="product version (default: latest in CMR; the current data are SPL3SMP_E v6, SPL3SMP v9, SPL2SMAP_S v3)")
-    ap.add_argument("--out-root", default="data_qc", help="output root (keep it separate from data/)")
+    ap.add_argument("--out-root", default=None, help="output root (default: data_qc for nz, data_regions/<region> otherwise; keep it separate from data/)")
     ap.add_argument("--chunk", default="MS", help="pandas frequency of the date chunks handed to workers")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--tasks-per-child", type=int, default=1,
@@ -231,9 +254,10 @@ def main():
     args = ap.parse_args()
 
     if args.inspect:
-        inspect(args.version)
+        inspect(args.version, REGIONS[args.region])
         return
-    out_root = Path(args.out_root)
+    bbox = REGIONS[args.region]
+    out_root = Path(args.out_root or ("data_qc" if args.region == "nz" else f"data_regions/{args.region}"))
     edges = list(pd.date_range(args.start, args.end, freq=args.chunk))
     starts = [pd.Timestamp(args.start)] + [e for e in edges if e > pd.Timestamp(args.start)]
     chunks = [(s, min(n - pd.Timedelta(days=1), pd.Timestamp(args.end)))
@@ -245,7 +269,7 @@ def main():
         # A fresh process per chunk frees whatever a worker accumulates (earthaccess/fsspec block
         # caches, kd-tree buffers) — long-lived workers were OOM-killed, which breaks the whole pool.
         with ProcessPoolExecutor(max_workers=args.workers, max_tasks_per_child=args.tasks_per_child) as ex:
-            futs = {ex.submit(run_chunk, short_name, str(s.date()), str(e.date()), args.version, out_root, args.overwrite): s
+            futs = {ex.submit(run_chunk, short_name, str(s.date()), str(e.date()), args.version, out_root, args.overwrite, bbox): s
                     for s, e in chunks}
             for i, f in enumerate(as_completed(futs), 1):
                 try:
@@ -255,6 +279,9 @@ def main():
                 rows.extend(r)
                 n_err = sum(x["status"] == "error" for x in r)
                 print(f"[{short_name}] chunk {i}/{len(chunks)} {futs[f].date()}: {len(r)} rows, {n_err} errors", flush=True)
+        if not rows:
+            print(f"[{short_name}] no granules in {args.start}..{args.end}", flush=True)
+            continue
         log = pd.DataFrame(rows)
         log.to_csv(out_root / f"download_log_{short_name}.csv", index=False)
         print(f"[{short_name}] status counts:\n{log['status'].value_counts().to_string()}", flush=True)
