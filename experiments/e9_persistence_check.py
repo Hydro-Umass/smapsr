@@ -9,7 +9,7 @@ training dates are in-sample):
   rise     largest rise of the bilinear coarse field since that scene (wetting that a net change can miss)
 
 Reports, per base model: (1) correlation of today's residual with r_prev by exact gap and gap bin, by gap x |dc| and
-gap x rise tercile (each residual pair minus its pixel's mean over the other rows, see `pair_demean`);
+gap x rise tercile (each residual minus its pixel's mean over separate other rows, see `pair_demean`);
 (2) the base + beta * r_prev prediction, beta per gap bin (`_g`) or gap bin x |dc| tercile (`_gc`), fitted on the other
 calendar blocks (not on training dates: models fit those, so their residuals are not representative); (3) model-free
 persist (last label) and persist_dc (last label + coarse change); `_shuf` is a negative control, the `_g` procedure
@@ -66,15 +66,26 @@ def demean(values, pix):
 
 
 def pair_demean(r, rp, pix):
-    """Row residual r and previous-scene residual rp, both minus their pixel's mean over the *other* rows. Removing a
-    mean that contains the pair itself makes the two look anti-correlated, which would fake a gain from a negative beta."""
-    n, s = np.bincount(pix), np.bincount(pix, r)
+    """Row residual r and previous-scene residual rp, each minus its pixel's mean over a different set of other rows
+    (rows alternate between the two sets). A mean containing the pair makes the two look anti-correlated, and one mean
+    shared by both makes them look correlated; either would fake a gain. Noise in the means attenuates the result,
+    so this errs towards no persistence."""
     order = np.argsort(pix, kind="stable")
-    in_rows = np.zeros(r.size, dtype=bool)                              # rp is the pixel's previous row
     same = pix[order[1:]] == pix[order[:-1]]
+    pos = np.zeros(r.size, dtype=np.int64)
+    in_rows = np.zeros(r.size, dtype=bool)                              # rp is the pixel's previous row
+    run = 0
+    for i, sm in enumerate(same, start=1):
+        run = run + 1 if sm else 0
+        pos[order[i]] = run
     in_rows[order[1:]] = same & np.isclose(rp[order[1:]], r[order[:-1]], atol=1e-5)
-    m = (s[pix] - r - np.where(in_rows, rp, 0.0)) / np.maximum(n[pix] - 1 - in_rows, 1)
-    return r - m, rp - m
+    odd = pos % 2 == 1
+    sums = np.stack([np.bincount(pix, np.where(odd, 0.0, r)), np.bincount(pix, np.where(odd, r, 0.0))])
+    ns = np.stack([np.bincount(pix, ~odd), np.bincount(pix, odd)]).astype(np.float64)
+    own, other = odd.astype(int), 1 - odd.astype(int)
+    m_r = (sums[own, pix] - r) / np.maximum(ns[own, pix] - 1, 1)
+    m_p = (sums[other, pix] - np.where(in_rows, rp, 0.0)) / np.maximum(ns[other, pix] - in_rows, 1)
+    return r - m_r, rp - m_p
 
 
 def gap_bin(gap):
