@@ -49,6 +49,7 @@ def main():
 
     v1 = e1.load_v1_models(a.v1, a.v1_tile, a.v1_halo, only)
     methods = e1.BASE_METHODS + list(v1)
+    diffs = e1.paired_with(methods, a.pairs)
     clim, n_train = e1.fit_climatology(a, e1.train_dates(a))
     C = clim.label_mean
 
@@ -100,11 +101,9 @@ def main():
                 pm = evals.point_metrics(d.insitu.to_numpy()[idx], d[m].to_numpy()[idx])
                 for k in ("R", "RMSE", "ubRMSE", "bias"):
                     r[f"{m}|{k}"] = pm[k]
-            for ref in ("bilinear", "clim_null"):
-                for m in who:
-                    if m != ref:
-                        for k in ("R", "RMSE", "ubRMSE"):
-                            r[f"{m}-{ref}|{k}"] = r[f"{m}|{k}"] - r[f"{ref}|{k}"]
+            for m, ref in diffs + [("label", ref) for ref in ("bilinear", "clim_null") if "label" in who]:
+                for k in ("R", "RMSE", "ubRMSE"):
+                    r[f"{m}-{ref}|{k}"] = r[f"{m}|{k}"] - r[f"{ref}|{k}"]
             return r
 
         point = stat(np.arange(len(d)))

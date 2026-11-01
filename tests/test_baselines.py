@@ -1,6 +1,10 @@
+import sys
+from pathlib import Path
+
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+import pytest
 
 from smapsr.baselines import Climatology, bilinear, block_constant, parent_valid
 from smapsr.models import Upsampler
@@ -57,3 +61,15 @@ def test_climatology_recovers_a_fixed_offset_and_defines_pixels_by_count():
         few.add(c, bilinear(c, 3) + off)
     assert not few.covered.any() and np.isnan(few.anomaly).all()
     assert np.allclose(few.null_model(c), bilinear(c, 3), atol=1e-6)     # falls back to bilinear
+
+
+
+
+def test_paired_with_adds_requested_pairs_and_rejects_unknown_methods():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+    from e1_baselines import paired_with
+    methods = ["bilinear", "clim_null", "v1_0", "v1_1"]
+    d = paired_with(methods, ["v1_0:v1_1"])
+    assert ("v1_0", "v1_1") in d and ("clim_null", "bilinear") in d and ("bilinear", "bilinear") not in d
+    with pytest.raises(ValueError):
+        paired_with(methods, ["v1_0:v1_9"])

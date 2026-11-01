@@ -11,7 +11,7 @@ climatology has >= min_count training observations; clim_only exists only there)
 (R, RMSE, uRMSE, bias), plus daily spatial R (median/IQR over dates with >= 100 pixels), the time-mean spatial R
 and the day-specific anomaly R (anomalies taken relative to the training label climatology C, so RMSE is unchanged
 and only the correlation isolates day-specific skill). CIs: moving calendar-block bootstrap over dates
-(`--block-days`), paired differences against bilinear and against clim_null.
+(`--block-days`), paired differences against bilinear and against clim_null, plus any `--pairs A:B`.
 
 Usage (project root):  PYTHONPATH=smapsr python smapsr/experiments/e1_baselines.py
 """
@@ -52,12 +52,22 @@ def build_parser():
     p.add_argument("--v1", nargs="*", default=[], help="train_v1 run directories (results/v1_train/run_*), or a checkpoint <run>/models/model_step<n>.eqx; each is evaluated as v1_<n>")
     p.add_argument("--v1-tile", type=int, default=32, help="V1 inference tile in coarse cells (= training crop; 0 = full grid, which GroupNorm penalises)")
     p.add_argument("--v1-halo", type=int, default=8, help="V1 inference halo in coarse cells around each tile")
+    p.add_argument("--pairs", nargs="*", default=[], metavar="A:B", help="extra paired differences A-B on the same bootstrap resamples, e.g. v1_3:v1_6")
     p.add_argument("--limit", type=int, default=0, help="debug: use only the first N dates of each period")
     return p
 
 
 def parse_args():
     return build_parser().parse_args()
+
+
+def paired_with(methods, pairs):
+    """(method, reference) differences to report: every method against bilinear and clim_null, plus `pairs` ("A:B")."""
+    extra = [tuple(x.split(":")) for x in pairs]
+    bad = {m for x in extra for m in x} - set(methods)
+    if bad or any(len(x) != 2 for x in extra):
+        raise ValueError(f"bad --pairs {pairs}; unknown methods {bad}")
+    return [(m, ref) for ref in ("bilinear", "clim_null") for m in methods if m != ref] + extra
 
 
 def load(cache, scale, date):
@@ -181,6 +191,7 @@ def main():
     t0 = time.time()
     v1 = load_v1_models(a.v1, a.v1_tile, a.v1_halo)
     methods = BASE_METHODS + list(v1)
+    diffs = paired_with(methods, a.pairs)
     excl = [pd.Timestamp(d) + pd.Timedelta(days=k) for d in a.exclude_dates
             for k in range(-a.exclude_buffer_days, a.exclude_buffer_days + 1)]
     train = [d for d in pair_dates(a.cache, a.fine, *a.train) if d not in excl]
@@ -276,15 +287,12 @@ def main():
         for m, name in enumerate(methods):
             out[f"{name}|covered|anomaly_R"] = am["R"][m]
             out[f"{name}|covered|anomaly_R_pixmean"] = am2["R"][m]
-        for ref in ("bilinear", "clim_null"):
-            for name in methods:
-                if name == ref:
-                    continue
-                for sub in SUBSETS:
-                    for k in ("R", "RMSE", "daily_R_median"):
-                        out[f"{name}-{ref}|{sub}|{k}"] = out[f"{name}|{sub}|{k}"] - out[f"{ref}|{sub}|{k}"]
-                for k in ("anomaly_R", "anomaly_R_pixmean"):
-                    out[f"{name}-{ref}|covered|{k}"] = out[f"{name}|covered|{k}"] - out[f"{ref}|covered|{k}"]
+        for name, ref in diffs:
+            for sub in SUBSETS:
+                for k in ("R", "RMSE", "daily_R_median"):
+                    out[f"{name}-{ref}|{sub}|{k}"] = out[f"{name}|{sub}|{k}"] - out[f"{ref}|{sub}|{k}"]
+            for k in ("anomaly_R", "anomaly_R_pixmean"):
+                out[f"{name}-{ref}|covered|{k}"] = out[f"{name}|covered|{k}"] - out[f"{ref}|covered|{k}"]
         return out
 
     point = stat(np.arange(len(test_used)))
