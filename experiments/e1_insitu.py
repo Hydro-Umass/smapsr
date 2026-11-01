@@ -37,6 +37,7 @@ def main():
     p.add_argument("--window-min", type=float, default=90.0)
     p.add_argument("--min-insitu-samples", type=int, default=1)
     p.add_argument("--all-tiles", action="store_true", help="run V1 on every tile, not only on those holding a station buffer (same values, slower)")
+    p.add_argument("--reuse", default=None, help="earlier *_insitu run: its v1_<n> columns join as prev_<n> (same matchups, same inference; saves re-running those models)")
     a = p.parse_args()
     t0 = time.time()
     sites = io.read_sites(Path(a.data_dir) / "sites.txt")
@@ -49,6 +50,11 @@ def main():
 
     v1 = e1.load_v1_models(a.v1, a.v1_tile, a.v1_halo, only)
     methods = e1.BASE_METHODS + list(v1)
+    prev = None
+    if a.reuse:
+        prev = pd.read_csv(Path(a.reuse) / "matchups.csv", parse_dates=["date"])
+        prev = prev[["date", "site"] + [c for c in prev if c.startswith("v1_")]].rename(columns=lambda c: c.replace("v1_", "prev_"))
+        methods = methods + [c for c in prev if c.startswith("prev_")]
     diffs = e1.paired_with(methods, a.pairs)
     clim, n_train = e1.fit_climatology(a, e1.train_dates(a))
     C = clim.label_mean
@@ -56,7 +62,7 @@ def main():
     dates = [d for d in e1.pair_dates(a.cache, a.coarse, *a.test)]
     if a.limit:
         dates = dates[:a.limit]
-    vals = {m: np.full((len(dates), len(sites)), np.nan) for m in methods + ["label"]}
+    vals = {m: np.full((len(dates), len(sites)), np.nan) for m in methods + ["label"] if not m.startswith("prev_")}
     for k, d in enumerate(dates):
         c = e1.load(a.cache, a.coarse, d)
         if c is None or not np.isfinite(c).any():
@@ -84,6 +90,11 @@ def main():
         df = pd.DataFrame(dict(date=dates, site=site["site"], insitu=m, insitu_n=n, **{k: v[:, s] for k, v in vals.items()}))
         rows.append(df[(df.insitu_n >= a.min_insitu_samples) & np.isfinite(df.insitu)])
     mu = pd.concat(rows, ignore_index=True)
+    if prev is not None:
+        n = len(mu)
+        mu = mu.merge(prev, on=["date", "site"], how="inner", validate="one_to_one")
+        if len(mu) != n or (len(prev) != n and not a.limit):
+            raise ValueError(f"--reuse matchups differ: {n} here, {len(prev)} in {a.reuse}, {len(mu)} joined")
     mu["year"] = mu.date.dt.year
     sub = {"common": np.isfinite(mu[methods].to_numpy()).all(1)}
     sub["label_days"] = sub["common"] & np.isfinite(mu["label"].to_numpy())
@@ -125,7 +136,7 @@ def main():
     mu.to_csv(run / "matchups.csv", index=False)
     cfg = dict(args=vars(a), methods=methods, n_train_dates=n_train, sites=sites.site.tolist(),
                n_cells_in_buffer=[len(c[0]) for c in cells], n_matchups={k: int(v.sum()) for k, v in sub.items()},
-               per_site_n={k: int(g.shape[0]) for k, g in mu[sub["common"]].groupby("site")}, v1_runs=a.v1, v1_tile=a.v1_tile, v1_halo=a.v1_halo,
+               per_site_n={k: int(g.shape[0]) for k, g in mu[sub["common"]].groupby("site")}, v1_runs=a.v1, reuse=a.reuse, v1_tile=a.v1_tile, v1_halo=a.v1_halo,
                v1_tiles_run=sorted(only) if only is not None else "all",
                grid="aligned 3 km, lat0 -32.77, lon0 164.67, step 0.03 (raw origin shifted one cell N/W)",
                git=e1.git_sha("smapsr"), runtime_s=round(time.time() - t0, 1))
