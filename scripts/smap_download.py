@@ -34,7 +34,8 @@ Usage:
     python smap_download.py --inspect
     python smap_download.py --products SPL3SMP_E SPL3SMP SPL2SMAP_S --workers 8
     python smap_download.py --products SPL2SMAP_S --start 2016-01-01 --end 2016-12-31
-    python smap_download.py --inspect --region murrumbidgee
+    python smap_download.py --inspect --region smapvex16_iowa
+    python smap_download.py --region smapvex16_iowa --start 2015-03-31 --chunk W
     python smap_download.py --region murrumbidgee --products SPL3SMP_E SPL3SMP SPL2SMAP_S SPL2SMA --start 2015-03-31 --chunk W
     python smap_download.py --out-root data_regions/nz_radar --products SPL3SMP_E SPL3SMP SPL2SMAP_S SPL2SMA --start 2015-04-13 --end 2015-07-07
 
@@ -57,7 +58,13 @@ import xarray as xr
 from pyresample import geometry, kd_tree
 
 REGIONS = {"nz": (164.7, -47.8, 179.6, -32.8),             # lon_min, lat_min, lon_max, lat_max (as in smap_data.ipynb)
-           "murrumbidgee": (144.0, -36.0, 148.0, -33.5)}   # SMAPEx-4/5, OzNet
+           "murrumbidgee": (144.0, -36.0, 148.0, -33.5),   # OzNet, SMAPEx-4/5
+           # about 40 x 40 cells at 9 km around the PALS domains: room for the model's context and a 32-cell training crop
+           "smapvex16_iowa": (-95.2, 40.7, -91.6, 44.3),
+           "smapvex16_manitoba": (-99.7, 47.8, -96.1, 51.4),
+           "smapvex15_walnutgulch": (-112.2, 29.9, -108.6, 33.5),
+           "smapvex19_millbrook": (-75.4, 40.05, -71.8, 43.65),
+           "smapvex19_massachusetts": (-73.9, 40.7, -70.3, 44.3)}
 MARGIN_DEG = 1.0                          # swath cells kept around the box before the kd-tree (> any radius)
 DATE_RE = re.compile(r"_(\d{8})(?:T\d{6})?_")   # first date token: L3 `_YYYYMMDD_`, L2 SP SMAP time `_YYYYMMDDThhmmss_`
 

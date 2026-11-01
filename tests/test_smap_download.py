@@ -33,6 +33,19 @@ def test_murrumbidgee_grids_nest_from_one_origin():
     assert coarse_lon.shape == (28, 45)
 
 
+@pytest.mark.parametrize("region", ["smapvex16_iowa", "smapvex16_manitoba", "smapvex15_walnutgulch",
+                                    "smapvex19_millbrook", "smapvex19_massachusetts"])
+def test_smapvex_boxes_hold_a_training_crop_and_nest(region):
+    bbox = REGIONS[region]
+    coarse_lon, coarse_lat = target_grid(0.09, bbox)
+    assert min(coarse_lon.shape) >= 32
+    lon, lat = target_grid(0.03, bbox)
+    n = min(lon.shape[1] // 3, coarse_lon.shape[1])
+    assert np.allclose(lon[0, ::3][:n], coarse_lon[0][:n])
+    n = min(lat.shape[0] // 3, coarse_lat.shape[0])
+    assert np.allclose(lat[::3, 0][:n], coarse_lat[:n, 0])
+
+
 def radar_file(path, lats, lons, sm):
     with h5py.File(path, "w") as f:
         g = f.create_group("Soil_Moisture_Retrieval_Data")
